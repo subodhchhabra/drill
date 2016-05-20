@@ -38,7 +38,6 @@ import org.apache.drill.exec.expr.holders.IntHolder;
 import org.apache.drill.exec.expr.holders.NullableVarCharHolder;
 import org.apache.drill.exec.expr.holders.VarBinaryHolder;
 import org.apache.drill.exec.expr.holders.VarCharHolder;
-import org.apache.drill.exec.record.RecordBatch;
 
 public class StringFunctions{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(StringFunctions.class);
@@ -50,84 +49,168 @@ public class StringFunctions{
    */
 
   @FunctionTemplate(name = "like", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Like implements DrillSimpleFunc{
+  public static class Like implements DrillSimpleFunc {
 
     @Param VarCharHolder input;
     @Param(constant=true) VarCharHolder pattern;
     @Output BitHolder out;
     @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexLike( //
           org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer))).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
     }
 
+    @Override
     public void eval() {
-      String i = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(input.start, input.end, input.buffer);
-      matcher.reset(i);
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
       out.value = matcher.matches()? 1:0;
     }
   }
 
   @FunctionTemplate(name = "like", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class LikeWithEscape implements DrillSimpleFunc{
+  public static class LikeWithEscape implements DrillSimpleFunc {
 
     @Param VarCharHolder input;
     @Param(constant=true) VarCharHolder pattern;
     @Param(constant=true) VarCharHolder escape;
     @Output BitHolder out;
     @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexLike( //
           org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer),
           org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(escape.start,  escape.end,  escape.buffer))).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
     }
 
+    @Override
     public void eval() {
-      String i = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(input.start, input.end, input.buffer);
-      matcher.reset(i);
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
       out.value = matcher.matches()? 1:0;
     }
   }
 
-  @FunctionTemplate(names = {"similar", "similar_to"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Similar implements DrillSimpleFunc{
+  @FunctionTemplate(name = "ilike", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class ILike implements DrillSimpleFunc {
+
     @Param VarCharHolder input;
     @Param(constant=true) VarCharHolder pattern;
     @Output BitHolder out;
     @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
 
-    public void setup(RecordBatch incoming) {
-
-      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexSimilar(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer))).matcher("");
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexLike( //
+          org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer)),
+          java.util.regex.Pattern.CASE_INSENSITIVE).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
     }
 
+    @Override
     public void eval() {
-      String i = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(input.start, input.end, input.buffer);
-      matcher.reset(i);
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
       out.value = matcher.matches()? 1:0;
     }
   }
 
-  @FunctionTemplate(names = {"similar", "similar_to"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class SimilarWithEscape implements DrillSimpleFunc{
+  @FunctionTemplate(name = "ilike", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class ILikeWithEscape implements DrillSimpleFunc {
+
     @Param VarCharHolder input;
     @Param(constant=true) VarCharHolder pattern;
     @Param(constant=true) VarCharHolder escape;
     @Output BitHolder out;
     @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexLike( //
+          org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer),
+          org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(escape.start,  escape.end,  escape.buffer)),
+          java.util.regex.Pattern.CASE_INSENSITIVE).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
+    }
 
+    @Override
+    public void eval() {
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
+      out.value = matcher.matches()? 1:0;
+    }
+  }
+
+  @FunctionTemplate(names = {"similar", "similar_to"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class Similar implements DrillSimpleFunc {
+    @Param VarCharHolder input;
+    @Param(constant=true) VarCharHolder pattern;
+    @Output BitHolder out;
+    @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
+
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexSimilar(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start, pattern.end, pattern.buffer))).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
+    }
+
+    @Override
+    public void eval() {
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
+      out.value = matcher.matches()? 1:0;
+    }
+  }
+
+  @FunctionTemplate(names = {"similar", "similar_to"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class SimilarWithEscape implements DrillSimpleFunc {
+    @Param VarCharHolder input;
+    @Param(constant=true) VarCharHolder pattern;
+    @Param(constant=true) VarCharHolder escape;
+    @Output BitHolder out;
+    @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
+
+    @Override
+    public void setup() {
       matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.RegexpUtil.sqlToRegexSimilar(
           org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer),
           org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(escape.start,  escape.end,  escape.buffer))).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
     }
 
+    @Override
     public void eval() {
-      String i = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(input.start, input.end, input.buffer);
-      matcher.reset(i);
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
       out.value = matcher.matches()? 1:0;
     }
   }
@@ -136,78 +219,121 @@ public class StringFunctions{
    * Replace all substring that match the regular expression with replacement.
    */
   @FunctionTemplate(name = "regexp_replace", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class RegexpReplace implements DrillSimpleFunc{
+  public static class RegexpReplace implements DrillSimpleFunc {
 
     @Param VarCharHolder input;
     @Param(constant=true) VarCharHolder pattern;
     @Param VarCharHolder replacement;
     @Inject DrillBuf buffer;
     @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
-      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer)).matcher("");
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start, pattern.end, pattern.buffer)).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
     }
 
+    @Override
     public void eval() {
-
       out.start = 0;
-      String i = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(input.start, input.end, input.buffer);
-      String r = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(replacement.start, replacement.end, replacement.buffer);
-      byte [] bytea = matcher.reset(i).replaceAll(r).getBytes(java.nio.charset.Charset.forName("UTF-8"));
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
+      final String r = org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(replacement.start, replacement.end, replacement.buffer);
+      final byte [] bytea = matcher.replaceAll(r).getBytes(java.nio.charset.Charset.forName("UTF-8"));
       out.buffer = buffer = buffer.reallocIfNeeded(bytea.length);
       out.buffer.setBytes(out.start, bytea);
       out.end = bytea.length;
     }
   }
 
-  @FunctionTemplate(names = {"char_length", "character_length", "length"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class CharLength implements DrillSimpleFunc{
+  /*
+   * Match the given input against a regular expression.
+   *
+   * This differs from the "similar" function in that accepts a standard regex, rather than a SQL regex.
+   */
+  @FunctionTemplate(name = "regexp_matches", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class RegexpMatches implements DrillSimpleFunc {
 
+    @Param VarCharHolder input;
+    @Param(constant=true) VarCharHolder pattern;
+    @Inject DrillBuf buffer;
+    @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
+    @Output BitHolder out;
+
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer)).matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
+    }
+
+    @Override
+    public void eval() {
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
+      out.value = matcher.matches()? 1:0;
+    }
+  }
+
+  @FunctionTemplate(names = {"char_length", "character_length", "length"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class CharLength implements DrillSimpleFunc {
     @Param  VarCharHolder input;
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.value = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(input.buffer, input.start, input.end);
     }
   }
 
   @FunctionTemplate(name = "lengthUtf8", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class ByteLength implements DrillSimpleFunc{
-
+  public static class ByteLength implements DrillSimpleFunc {
     @Param  VarBinaryHolder input;
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.value = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(input.buffer, input.start, input.end);
     }
   }
 
   @FunctionTemplate(name = "octet_length", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class OctetLength implements DrillSimpleFunc{
-
+  public static class OctetLength implements DrillSimpleFunc {
     @Param  VarCharHolder input;
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.value = input.end - input.start;
     }
   }
 
   @FunctionTemplate(name = "bit_length", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class BitLength implements DrillSimpleFunc{
-
+  public static class BitLength implements DrillSimpleFunc {
     @Param  VarCharHolder input;
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.value = (input.end - input.start) * 8;
     }
@@ -222,24 +348,89 @@ public class StringFunctions{
    *     position('', '')                   1                     0
    */
   @FunctionTemplate(name = "position", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Position implements DrillSimpleFunc{
-
+  public static class Position implements DrillSimpleFunc {
     @Param  VarCharHolder substr;
     @Param  VarCharHolder str;
 
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       //Do string match.
-      int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(str.buffer, str.start, str.end,
+      final int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(str.buffer, str.start, str.end,
                                                                                           substr.buffer, substr.start, substr.end);
       if (pos < 0) {
         out.value = 0; //indicate not found a matched substr.
       } else {
         //Count the # of characters. (one char could have 1-4 bytes)
         out.value = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(str.buffer, str.start, pos) + 1;
+      }
+    }
+
+  }
+
+
+  @FunctionTemplate(name = "split_part", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class SplitPart implements DrillSimpleFunc {
+    @Param  VarCharHolder str;
+    @Param  VarCharHolder splitter;
+    @Param  IntHolder index;
+
+    @Output VarCharHolder out;
+
+    @Override
+    public void setup() {}
+
+    @Override
+    public void eval() {
+      if (index.value < 1) {
+        throw org.apache.drill.common.exceptions.UserException.functionError()
+            .message("Index in split_part must be positive, value provided was " + index.value).build();
+      }
+      int bufPos = str.start;
+      out.start = bufPos;
+      boolean beyondLastIndex = false;
+      int splitterLen = (splitter.end - splitter.start);
+      for (int i = 1; i < index.value + 1; i++) {
+        //Do string match.
+        final int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(str.buffer,
+            bufPos, str.end,
+            splitter.buffer, splitter.start, splitter.end);
+        if (pos < 0) {
+          // this is the last iteration, it is okay to hit the end of the string
+          if (i == index.value) {
+            bufPos = str.end;
+            // when the output is terminated by the end of the string we do not want
+            // to subtract the length of the splitter from the output at the end of
+            // the function below
+            splitterLen = 0;
+            break;
+          } else {
+            beyondLastIndex = true;
+            break;
+          }
+        } else {
+          // Count the # of characters. (one char could have 1-4 bytes)
+          // unlike the position function don't add 1, we are not translating the positions into SQL user level 1 based indices
+          bufPos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(str.buffer, str.start, pos)
+              + splitterLen;
+          // if this is the second to last iteration, store the position again, as the start and end of the
+          // string to be returned need to be available
+          if (i == index.value - 1) {
+            out.start = bufPos;
+          }
+        }
+      }
+      if (beyondLastIndex) {
+        out.start = 0;
+        out.end = 0;
+        out.buffer = str.buffer;
+      } else {
+        out.buffer = str.buffer;
+        out.end = bufPos - splitterLen;
       }
     }
 
@@ -247,15 +438,16 @@ public class StringFunctions{
 
   // same as function "position(substr, str) ", except the reverse order of argument.
   @FunctionTemplate(name = "strpos", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Strpos implements DrillSimpleFunc{
-
+  public static class Strpos implements DrillSimpleFunc {
     @Param  VarCharHolder str;
     @Param  VarCharHolder substr;
 
     @Output BigIntHolder out;
 
-    public void setup(RecordBatch incoming) {}
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       //Do string match.
       int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(str.buffer, str.start, str.end,
@@ -267,22 +459,22 @@ public class StringFunctions{
         out.value = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(str.buffer, str.start, pos) + 1;
       }
     }
-
   }
 
   /*
    * Convert string to lower case.
    */
   @FunctionTemplate(name = "lower", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class LowerCase implements DrillSimpleFunc{
-
+  public static class LowerCase implements DrillSimpleFunc {
     @Param VarCharHolder input;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded(input.end- input.start);
       out.start = 0;
@@ -305,22 +497,24 @@ public class StringFunctions{
    * Convert string to upper case.
    */
   @FunctionTemplate(name = "upper", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class UpperCase implements DrillSimpleFunc{
+  public static class UpperCase implements DrillSimpleFunc {
 
     @Param VarCharHolder input;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded(input.end- input.start);
       out.start = 0;
       out.end = input.end - input.start;
 
       for (int id = input.start; id < input.end; id++) {
-        byte  currentByte = input.buffer.getByte(id);
+        byte currentByte = input.buffer.getByte(id);
 
         // 'A - Z' : 0x41 - 0x5A
         // 'a - z' : 0x61 - 0x7A
@@ -337,8 +531,7 @@ public class StringFunctions{
   //  -- Valid "offset": [1, string_length],
   //  -- Valid "length": [1, up to string_length - offset + 1], if length > string_length - offset +1, get the substr up to the string_lengt.
   @FunctionTemplate(names = {"substring", "substr"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Substring implements DrillSimpleFunc{
-
+  public static class Substring implements DrillSimpleFunc {
     @Param VarCharHolder string;
     @Param BigIntHolder offset;
     @Param BigIntHolder length;
@@ -346,10 +539,11 @@ public class StringFunctions{
     @Output VarCharHolder out;
     @Workspace ByteBuf buffer;
 
-    public void setup(RecordBatch incoming) {
-
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = string.buffer;
       // if length is NOT positive, or offset is NOT positive, or input string is empty, return empty string.
@@ -357,9 +551,8 @@ public class StringFunctions{
         out.start = out.end = 0;
       } else {
         //Do 1st scan to counter # of character in string.
-        int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
-
-        int fromCharIdx = (int) offset.value; //the start position of char  (inclusive)
+        final int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
+        final int fromCharIdx = (int) offset.value; //the start position of char  (inclusive)
 
         if (fromCharIdx > charCount ) { // invalid length, return empty string.
           out.start = out.end = 0;
@@ -373,21 +566,21 @@ public class StringFunctions{
         }
       }
     }
-
   }
 
   @FunctionTemplate(names = {"substring", "substr"}, scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class SubstringOffset implements DrillSimpleFunc{
-
+  public static class SubstringOffset implements DrillSimpleFunc {
     @Param VarCharHolder string;
     @Param BigIntHolder offset;
 
     @Output VarCharHolder out;
     @Workspace ByteBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = string.buffer;
       // if length is NOT positive, or offset is NOT positive, or input string is empty, return empty string.
@@ -395,9 +588,8 @@ public class StringFunctions{
         out.start = out.end = 0;
       } else {
         //Do 1st scan to counter # of character in string.
-        int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
-
-        int fromCharIdx = (int) offset.value; //the start position of char  (inclusive)
+        final int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
+        final int fromCharIdx = (int) offset.value; //the start position of char  (inclusive)
 
         if (fromCharIdx > charCount ) { // invalid length, return empty string.
           out.start = out.end = 0;
@@ -407,7 +599,76 @@ public class StringFunctions{
         }
       }
     }
+  }
 
+  @FunctionTemplate(names = {"substring", "substr" }, scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
+  public static class SubstringRegex implements DrillSimpleFunc {
+    @Param VarCharHolder input;
+    @Param(constant=true) VarCharHolder pattern;
+    @Output NullableVarCharHolder out;
+    @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
+
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(
+          org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer))
+          .matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
+    }
+
+    @Override
+    public void eval() {
+      charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+      // Reusing same charSequenceWrapper, no need to pass it in.
+      // This saves one method call since reset(CharSequence) calls reset()
+      matcher.reset();
+      if (matcher.find()) {
+        out.isSet = 1;
+        out.buffer = input.buffer;
+        out.start = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(input.buffer, input.start, input.end, matcher.start());
+        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(input.buffer, input.start, input.end, matcher.end());
+      }
+    }
+  }
+
+  @FunctionTemplate(names = {"substring", "substr" }, scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
+  public static class SubstringRegexNullable implements DrillSimpleFunc {
+    @Param NullableVarCharHolder input;
+    @Param(constant=true) VarCharHolder pattern;
+    @Output NullableVarCharHolder out;
+    @Workspace java.util.regex.Matcher matcher;
+    @Workspace org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper charSequenceWrapper;
+
+    @Override
+    public void setup() {
+      matcher = java.util.regex.Pattern.compile(
+          org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(pattern.start,  pattern.end,  pattern.buffer))
+          .matcher("");
+      charSequenceWrapper = new org.apache.drill.exec.expr.fn.impl.CharSequenceWrapper();
+      matcher.reset(charSequenceWrapper);
+    }
+
+    @Override
+    public void eval() {
+      if (input.isSet == 0) {
+        out.isSet = 0;
+      } else {
+        charSequenceWrapper.setBuffer(input.start, input.end, input.buffer);
+        // Reusing same charSequenceWrapper, no need to pass it in.
+        // This saves one method call since reset(CharSequence) calls reset()
+        matcher.reset();
+        if (matcher.find()) {
+          out.isSet = 1;
+          out.buffer = input.buffer;
+          out.start = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(input.buffer, input.start, input.end, matcher.start());
+          out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(input.buffer, input.start, input.end, matcher.end());
+        } else {
+          out.isSet = 0;
+        }
+      }
+    }
   }
 
   // Return first length characters in the string. When length is negative, return all but last |length| characters.
@@ -415,17 +676,18 @@ public class StringFunctions{
   // If length = 0, return empty
   // If length < 0, and |length| > total charcounts, return empty.
   @FunctionTemplate(name = "left", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Left implements DrillSimpleFunc{
-
+  public static class Left implements DrillSimpleFunc {
     @Param VarCharHolder string;
     @Param BigIntHolder length;
 
     @Output VarCharHolder out;
     @Workspace ByteBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = string.buffer;
       // if length is 0, or input string is empty, return empty string.
@@ -433,13 +695,14 @@ public class StringFunctions{
         out.start = out.end = 0;
       } else {
         //Do 1st scan to counter # of character in string.
-        int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
-
-        int charLen = 0;
+        final int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
+        final int charLen;
         if (length.value > 0) {
           charLen = Math.min((int)length.value, charCount);  //left('abc', 5) -> 'abc'
         } else if (length.value < 0) {
           charLen = Math.max(0, charCount + (int)length.value) ; // left('abc', -5) ==> ''
+        } else {
+          charLen = 0;
         }
 
         out.start = string.start; //Starting from the left of input string.
@@ -450,17 +713,18 @@ public class StringFunctions{
 
   //Return last 'length' characters in the string. When 'length' is negative, return all but first |length| characters.
   @FunctionTemplate(name = "right", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Right implements DrillSimpleFunc{
-
+  public static class Right implements DrillSimpleFunc {
     @Param VarCharHolder string;
     @Param BigIntHolder length;
 
     @Output VarCharHolder out;
     @Workspace ByteBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = string.buffer;
       // invalid length.
@@ -468,10 +732,9 @@ public class StringFunctions{
         out.start = out.end = 0;
       } else {
         //Do 1st scan to counter # of character in string.
-        int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
-
-        int fromCharIdx; //the start position of char (inclusive)
-        int charLen; // the end position of char (inclusive)
+        final int charCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(string.buffer, string.start, string.end);
+        final int fromCharIdx; //the start position of char (inclusive)
+        final int charLen; // the end position of char (inclusive)
         if (length.value > 0) {
           fromCharIdx = Math.max(charCount - (int) length.value + 1, 1); // right('abc', 5) ==> 'abc' fromCharIdx=1.
           charLen = charCount - fromCharIdx + 1;
@@ -481,7 +744,7 @@ public class StringFunctions{
         }
 
         // invalid length :  right('abc', -5) -> ''
-        if (charLen <=0) {
+        if (charLen <= 0) {
           out.start = out.end = 0;
         } else {
           //Do 2nd scan of string. Get bytes corresponding chars in range.
@@ -494,15 +757,16 @@ public class StringFunctions{
 
 
   @FunctionTemplate(name = "initcap", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class InitCap implements DrillSimpleFunc{
-
+  public static class InitCap implements DrillSimpleFunc {
     @Param VarCharHolder input;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded(input.end - input.start);
       out.start = 0;
@@ -514,18 +778,19 @@ public class StringFunctions{
 
   //Replace all occurrences in 'text' of substring 'from' with substring 'to'
   @FunctionTemplate(name = "replace", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Replace implements DrillSimpleFunc{
-
+  public static class Replace implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  VarCharHolder from;
     @Param  VarCharHolder to;
     @Inject DrillBuf buffer;
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       buffer = buffer.reallocIfNeeded(8000);
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer;
       out.start = out.end = 0;
@@ -536,9 +801,9 @@ public class StringFunctions{
         //If "from" is not empty and it's length is no longer than text's length
         //then, we may find a match, and do replace.
         int i = text.start;
-        for (; i<=text.end - fromL; ) {
+        for (; i <= text.end - fromL; ) {
           int j = from.start;
-          for (; j<from.end; j++) {
+          for (; j < from.end; j++) {
             if (text.buffer.getByte(i + j - from.start) != from.buffer.getByte(j)) {
               break;
             }
@@ -546,7 +811,7 @@ public class StringFunctions{
 
           if (j == from.end ) {
             //find a true match ("from" is not empty), copy entire "to" string to out buffer
-            for (int k = to.start ; k< to.end; k++) {
+            for (int k = to.start ; k < to.end; k++) {
               out.buffer.setByte(out.end++, to.buffer.getByte(k));
             }
 
@@ -559,7 +824,7 @@ public class StringFunctions{
         }
 
         //Copy the tail part of text (length < fromL).
-        for (; i< text.end; i++) {
+        for (; i < text.end; i++) {
           out.buffer.setByte(out.end++, text.buffer.getByte(i));
         }
       } else {
@@ -569,9 +834,7 @@ public class StringFunctions{
         out.start = text.start;
         out.end = text.end;
       }
-
     } // end of eval()
-
   }
 
   /*
@@ -579,8 +842,7 @@ public class StringFunctions{
    * If the string is already longer than length, then it is truncated (on the right).
    */
   @FunctionTemplate(name = "lpad", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Lpad implements DrillSimpleFunc{
-
+  public static class Lpad implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  BigIntHolder length;
     @Param  VarCharHolder fill;
@@ -588,11 +850,15 @@ public class StringFunctions{
 
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
-      buffer = buffer.reallocIfNeeded((int) length.value*2);
+      final long theLength = length.value;
+      final int lengthNeeded = (int) (theLength <= 0 ? 0 : theLength * 2);
+      buffer = buffer.reallocIfNeeded(lengthNeeded);
       byte currentByte = 0;
       int id = 0;
       //get the char length of text.
@@ -601,29 +867,29 @@ public class StringFunctions{
       //get the char length of fill.
       int fillCharCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(fill.buffer, fill.start, fill.end);
 
-      if (length.value <= 0) {
+      if (theLength <= 0) {
         //case 1: target length is <=0, then return an empty string.
         out.buffer = buffer;
         out.start = out.end = 0;
-      } else if (length.value == textCharCount || (length.value > textCharCount  && fillCharCount == 0) ) {
+      } else if (theLength == textCharCount || (theLength > textCharCount  && fillCharCount == 0) ) {
         //case 2: target length is same as text's length, or need fill into text but "fill" is empty, then return text directly.
         out.buffer = text.buffer;
         out.start = text.start;
         out.end = text.end;
-      } else if (length.value < textCharCount) {
+      } else if (theLength < textCharCount) {
         //case 3: truncate text on the right side. It's same as substring(text, 1, length).
         out.buffer = text.buffer;
         out.start = text.start;
-        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int)length.value);
-      } else if (length.value > textCharCount) {
-        //case 4: copy "fill" on left. Total # of char to copy : length.value - textCharCount
+        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int) theLength);
+      } else if (theLength > textCharCount) {
+        //case 4: copy "fill" on left. Total # of char to copy : theLength - textCharCount
         int count = 0;
         out.buffer = buffer;
         out.start = out.end = 0;
 
-        while (count < length.value - textCharCount) {
+        while (count < theLength - textCharCount) {
           for (id = fill.start; id < fill.end; id++) {
-            if (count == length.value - textCharCount) {
+            if (count == theLength - textCharCount) {
               break;
             }
 
@@ -644,7 +910,65 @@ public class StringFunctions{
         }
       }
     } // end of eval
+  }
 
+  /*
+   * Fill up the string to length 'length' by prepending the character ' ' in the beginning of 'text'.
+   * If the string is already longer than length, then it is truncated (on the right).
+   */
+  @FunctionTemplate(name = "lpad", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class LpadTwoArg implements DrillSimpleFunc {
+    @Param  VarCharHolder text;
+    @Param  BigIntHolder length;
+    @Inject DrillBuf buffer;
+
+    @Output VarCharHolder out;
+    @Workspace byte spaceInByte;
+
+    @Override
+    public void setup() {
+      spaceInByte = 32;
+    }
+
+    @Override
+    public void eval() {
+      final long theLength = length.value;
+      final int lengthNeeded = (int) (theLength <= 0 ? 0 : theLength * 2);
+      buffer = buffer.reallocIfNeeded(lengthNeeded);
+      //get the char length of text.
+      int textCharCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(text.buffer, text.start, text.end);
+
+      if (theLength <= 0) {
+        //case 1: target length is <=0, then return an empty string.
+        out.buffer = buffer;
+        out.start = out.end = 0;
+      } else if (theLength == textCharCount) {
+        //case 2: target length is same as text's length.
+        out.buffer = text.buffer;
+        out.start = text.start;
+        out.end = text.end;
+      } else if (theLength < textCharCount) {
+        //case 3: truncate text on the right side. It's same as substring(text, 1, length).
+        out.buffer = text.buffer;
+        out.start = text.start;
+        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int) theLength);
+      } else if (theLength > textCharCount) {
+        //case 4: copy " " on left. Total # of char to copy : theLength - textCharCount
+        int count = 0;
+        out.buffer = buffer;
+        out.start = out.end = 0;
+
+        while (count < theLength - textCharCount) {
+          out.buffer.setByte(out.end++, spaceInByte);
+          ++count;
+        } // end of while
+
+        //copy "text" into "out"
+        for (int id = text.start; id < text.end; id++) {
+          out.buffer.setByte(out.end++, text.buffer.getByte(id));
+        }
+      }
+    } // end of eval
   }
 
   /**
@@ -652,8 +976,7 @@ public class StringFunctions{
    * If the string is already longer than length then it is truncated.
    */
   @FunctionTemplate(name = "rpad", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Rpad implements DrillSimpleFunc{
-
+  public static class Rpad implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  BigIntHolder length;
     @Param  VarCharHolder fill;
@@ -661,11 +984,15 @@ public class StringFunctions{
 
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
-      buffer = buffer.reallocIfNeeded((int) length.value*2);
+      final long theLength = length.value;
+      final int lengthNeeded = (int) (theLength <= 0 ? 0 : theLength * 2);
+      buffer = buffer.reallocIfNeeded(lengthNeeded);
 
       byte currentByte = 0;
       int id = 0;
@@ -675,21 +1002,21 @@ public class StringFunctions{
       //get the char length of fill.
       int fillCharCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(fill.buffer, fill.start, fill.end);
 
-      if (length.value <= 0) {
+      if (theLength <= 0) {
         //case 1: target length is <=0, then return an empty string.
         out.buffer = buffer;
         out.start = out.end = 0;
-      } else if (length.value == textCharCount || (length.value > textCharCount  && fillCharCount == 0) ) {
+      } else if (theLength == textCharCount || (theLength > textCharCount  && fillCharCount == 0) ) {
         //case 2: target length is same as text's length, or need fill into text but "fill" is empty, then return text directly.
         out.buffer = text.buffer;
         out.start = text.start;
         out.end = text.end;
-      } else if (length.value < textCharCount) {
+      } else if (theLength < textCharCount) {
         //case 3: truncate text on the right side. It's same as substring(text, 1, length).
         out.buffer = text.buffer;
         out.start = text.start;
-        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int)length.value);
-      } else if (length.value > textCharCount) {
+        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int) theLength);
+      } else if (theLength > textCharCount) {
         //case 4: copy "text" into "out", then copy "fill" on the right.
         out.buffer = buffer;
         out.start = out.end = 0;
@@ -698,12 +1025,12 @@ public class StringFunctions{
           out.buffer.setByte(out.end++, text.buffer.getByte(id));
         }
 
-        //copy "fill" on right. Total # of char to copy : length.value - textCharCount
+        //copy "fill" on right. Total # of char to copy : theLength - textCharCount
         int count = 0;
 
-        while (count < length.value - textCharCount) {
+        while (count < theLength - textCharCount) {
           for (id = fill.start; id < fill.end; id++) {
-            if (count == length.value - textCharCount) {
+            if (count == theLength - textCharCount) {
               break;
             }
 
@@ -720,23 +1047,85 @@ public class StringFunctions{
 
       }
     } // end of eval
+  }
 
+  /**
+   * Fill up the string to length "length" by appending the characters ' ' at the end of 'text'
+   * If the string is already longer than length then it is truncated.
+   */
+  @FunctionTemplate(name = "rpad", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class RpadTwoArg implements DrillSimpleFunc {
+    @Param  VarCharHolder text;
+    @Param  BigIntHolder length;
+    @Inject DrillBuf buffer;
+
+    @Output VarCharHolder out;
+    @Workspace byte spaceInByte;
+
+    @Override
+    public void setup() {
+      spaceInByte = 32;
+    }
+
+    @Override
+    public void eval() {
+      final long theLength = length.value;
+      final int lengthNeeded = (int) (theLength <= 0 ? 0 : theLength * 2);
+      buffer = buffer.reallocIfNeeded(lengthNeeded);
+
+      //get the char length of text.
+      int textCharCount = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharLength(text.buffer, text.start, text.end);
+
+      if (theLength <= 0) {
+        //case 1: target length is <=0, then return an empty string.
+        out.buffer = buffer;
+        out.start = out.end = 0;
+      } else if (theLength == textCharCount) {
+        //case 2: target length is same as text's length.
+        out.buffer = text.buffer;
+        out.start = text.start;
+        out.end = text.end;
+      } else if (theLength < textCharCount) {
+        //case 3: truncate text on the right side. It's same as substring(text, 1, length).
+        out.buffer = text.buffer;
+        out.start = text.start;
+        out.end = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.getUTF8CharPosition(text.buffer, text.start, text.end, (int) theLength);
+      } else if (theLength > textCharCount) {
+        //case 4: copy "text" into "out", then copy " " on the right.
+        out.buffer = buffer;
+        out.start = out.end = 0;
+
+        for (int id = text.start; id < text.end; id++) {
+          out.buffer.setByte(out.end++, text.buffer.getByte(id));
+        }
+
+        //copy " " on right. Total # of char to copy : theLength - textCharCount
+        int count = 0;
+
+        while (count < theLength - textCharCount) {
+          out.buffer.setByte(out.end++, spaceInByte);
+          ++count;
+        } // end of while
+
+      }
+    } // end of eval
   }
 
   /**
    * Remove the longest string containing only characters from "from"  from the start of "text"
    */
   @FunctionTemplate(name = "ltrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Ltrim implements DrillSimpleFunc{
-
+  public static class Ltrim implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  VarCharHolder from;
 
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = text.buffer;
       out.start = out.end = text.end;
@@ -753,23 +1142,53 @@ public class StringFunctions{
         }
       }
     } // end of eval
+  }
 
+  /**
+   * Remove the longest string containing only character " " from the start of "text"
+   */
+  @FunctionTemplate(name = "ltrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class LtrimOneArg implements DrillSimpleFunc {
+    @Param  VarCharHolder text;
+
+    @Output VarCharHolder out;
+    @Workspace byte spaceInByte;
+
+    @Override
+    public void setup() {
+      spaceInByte = 32;
+    }
+
+    @Override
+    public void eval() {
+      out.buffer = text.buffer;
+      out.start = out.end = text.end;
+
+      //Scan from left of "text", stop until find a char not " "
+      for (int id = text.start; id < text.end; ++id) {
+      if (text.buffer.getByte(id) != spaceInByte) { // Found the 1st char not " ", stop
+          out.start = id;
+          break;
+        }
+      }
+    } // end of eval
   }
 
   /**
    * Remove the longest string containing only characters from "from"  from the end of "text"
    */
   @FunctionTemplate(name = "rtrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Rtrim implements DrillSimpleFunc{
-
+  public static class Rtrim implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  VarCharHolder from;
 
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = text.buffer;
       out.start = out.end = text.start;
@@ -792,19 +1211,53 @@ public class StringFunctions{
   }
 
   /**
+   * Remove the longest string containing only character " " from the end of "text"
+   */
+  @FunctionTemplate(name = "rtrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class RtrimOneArg implements DrillSimpleFunc {
+    @Param  VarCharHolder text;
+
+    @Output VarCharHolder out;
+    @Workspace byte spaceInByte;
+
+    @Override
+    public void setup() {
+      spaceInByte = 32;
+    }
+
+    @Override
+    public void eval() {
+      out.buffer = text.buffer;
+      out.start = out.end = text.start;
+
+      //Scan from right of "text", stop until find a char not in " "
+      for (int id = text.end - 1; id >= text.start; --id) {
+        while ((text.buffer.getByte(id) & 0xC0) == 0x80 && id >= text.start) {
+          id--;
+        }
+        if (text.buffer.getByte(id) != spaceInByte) { // Found the 1st char not in " ", stop
+          out.end = id + 1;
+          break;
+        }
+      }
+    } // end of eval
+  }
+
+  /**
    * Remove the longest string containing only characters from "from"  from the start of "text"
    */
   @FunctionTemplate(name = "btrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Btrim implements DrillSimpleFunc{
-
+  public static class Btrim implements DrillSimpleFunc {
     @Param  VarCharHolder text;
     @Param  VarCharHolder from;
 
     @Output VarCharHolder out;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = text.buffer;
       out.start = out.end = text.start;
@@ -827,10 +1280,51 @@ public class StringFunctions{
           id--;
         }
         bytePerChar = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.utf8CharLen(text.buffer, id);
-        int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(from.buffer, from.start, from.end,
+        final int pos = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.stringLeftMatchUTF8(from.buffer, from.start, from.end,
                                                                                             text.buffer, id, id + bytePerChar);
         if (pos < 0) { // Found the 1st char not in "from", stop
-          out.end = id+ bytePerChar;
+          out.end = id + bytePerChar;
+          break;
+        }
+      }
+    } // end of eval
+  }
+
+  /**
+   * Remove the longest string containing only character " " from the start of "text"
+   */
+  @FunctionTemplate(name = "btrim", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
+  public static class BtrimOneArg implements DrillSimpleFunc {
+    @Param  VarCharHolder text;
+
+    @Output VarCharHolder out;
+    @Workspace byte spaceInByte;
+
+    @Override
+    public void setup() {
+      spaceInByte = 32;
+    }
+
+    @Override
+    public void eval() {
+      out.buffer = text.buffer;
+      out.start = out.end = text.start;
+
+      //Scan from left of "text", stop until find a char not " "
+      for (int id = text.start; id < text.end; ++id) {
+        if (text.buffer.getByte(id) != spaceInByte) { // Found the 1st char not " ", stop
+          out.start = id;
+          break;
+        }
+      }
+
+      //Scan from right of "text", stop until find a char not " "
+      for (int id = text.end - 1; id >= text.start; --id) {
+        while ((text.buffer.getByte(id) & 0xC0) == 0x80 && id >= text.start) {
+          id--;
+        }
+        if (text.buffer.getByte(id) != spaceInByte) { // Found the 1st char not in " ", stop
+          out.end = id + 1;
           break;
         }
       }
@@ -838,15 +1332,17 @@ public class StringFunctions{
   }
 
   @FunctionTemplate(name = "concatOperator", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class ConcatOperator implements DrillSimpleFunc{
+  public static class ConcatOperator implements DrillSimpleFunc {
     @Param  VarCharHolder left;
     @Param  VarCharHolder right;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded( (left.end - left.start) + (right.end - right.start));
       out.start = out.end = 0;
@@ -865,17 +1361,17 @@ public class StringFunctions{
   //Concatenate the text representations of the arguments. NULL arguments are ignored.
   //TODO: NullHanding.INTERNAL for DrillSimpleFunc requires change in code generation.
   @FunctionTemplate(name = "concat", scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
-  public static class Concat implements DrillSimpleFunc{
-
+  public static class Concat implements DrillSimpleFunc {
     @Param  VarCharHolder left;
     @Param  VarCharHolder right;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded( (left.end - left.start) + (right.end - right.start));
       out.start = out.end = 0;
@@ -892,17 +1388,17 @@ public class StringFunctions{
   }
 
   @FunctionTemplate(name = "concat", scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
-  public static class ConcatRightNullInput implements DrillSimpleFunc{
-
+  public static class ConcatRightNullInput implements DrillSimpleFunc {
     @Param  VarCharHolder left;
     @Param  NullableVarCharHolder right;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer = buffer.reallocIfNeeded( (left.end - left.start) + (right.end - right.start));;
       out.start = out.end = 0;
@@ -913,25 +1409,25 @@ public class StringFunctions{
       }
 
       if (right.isSet == 1) {
-       for (id = right.start; id < right.end; id++) {
-        out.buffer.setByte(out.end++, right.buffer.getByte(id));
-      }
+        for (id = right.start; id < right.end; id++) {
+          out.buffer.setByte(out.end++, right.buffer.getByte(id));
+        }
       }
     }
   }
 
   @FunctionTemplate(name = "concat", scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
-  public static class ConcatLeftNullInput implements DrillSimpleFunc{
-
+  public static class ConcatLeftNullInput implements DrillSimpleFunc {
     @Param  NullableVarCharHolder left;
     @Param  VarCharHolder right;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer.reallocIfNeeded( (left.end - left.start) + (right.end - right.start));
       out.start = out.end = 0;
@@ -950,17 +1446,17 @@ public class StringFunctions{
   }
 
   @FunctionTemplate(name = "concat", scope = FunctionScope.SIMPLE, nulls = NullHandling.INTERNAL)
-  public static class ConcatBothNullInput implements DrillSimpleFunc{
-
+  public static class ConcatBothNullInput implements DrillSimpleFunc {
     @Param  NullableVarCharHolder left;
     @Param  NullableVarCharHolder right;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       out.buffer = buffer.reallocIfNeeded( (left.end - left.start) + (right.end - right.start));
       out.start = out.end = 0;
@@ -984,12 +1480,13 @@ public class StringFunctions{
   // "\xca\xfe\xba\xbe" => (byte[]) {(byte)0xca, (byte)0xfe, (byte)0xba, (byte)0xbe}
   @FunctionTemplate(name = "binary_string", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class BinaryString implements DrillSimpleFunc {
-
     @Param  VarCharHolder in;
     @Output VarBinaryHolder out;
 
-    public void setup(RecordBatch incoming) { }
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.buffer = in.buffer;
       out.start = in.start;
@@ -1002,16 +1499,17 @@ public class StringFunctions{
   // (byte[]) {(byte)0xca, (byte)0xfe, (byte)0xba, (byte)0xbe}  => "\xca\xfe\xba\xbe"
   @FunctionTemplate(name = "string_binary", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class StringBinary implements DrillSimpleFunc {
-
     @Param  VarBinaryHolder in;
     @Output VarCharHolder   out;
     @Workspace Charset charset;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       charset = java.nio.charset.Charset.forName("UTF-8");
     }
 
+    @Override
     public void eval() {
       byte[] buf = org.apache.drill.common.util.DrillStringUtils.toBinaryString(in.buffer, in.start, in.end).getBytes(charset);
       buffer.setBytes(0, buf);
@@ -1028,12 +1526,13 @@ public class StringFunctions{
   */
   @FunctionTemplate(name = "ascii", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class AsciiString implements DrillSimpleFunc {
-
     @Param  VarCharHolder in;
     @Output IntHolder out;
 
-    public void setup(RecordBatch incoming) { }
+    @Override
+    public void setup() {}
 
+    @Override
     public void eval() {
       out.value = in.buffer.getByte(in.start);
     }
@@ -1044,15 +1543,16 @@ public class StringFunctions{
   */
   @FunctionTemplate(name = "chr", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class AsciiToChar implements DrillSimpleFunc {
-
     @Param  IntHolder in;
     @Output VarCharHolder out;
     @Inject DrillBuf buf;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       buf = buf.reallocIfNeeded(1);
     }
 
+    @Override
     public void eval() {
       out.buffer = buf;
       out.start = out.end = 0;
@@ -1072,12 +1572,14 @@ public class StringFunctions{
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       final int len = in.end - in.start;
-      int num = nTimes.value;
+      final int num = nTimes.value;
       out.start = 0;
       out.buffer = buffer = buffer.reallocIfNeeded( len * num );
       for (int i =0; i < num; i++) {
@@ -1092,24 +1594,25 @@ public class StringFunctions{
   */
   @FunctionTemplate(name = "toascii", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class AsciiEndode implements DrillSimpleFunc {
-
     @Param  VarCharHolder in;
     @Param  VarCharHolder enc;
     @Output VarCharHolder out;
     @Workspace Charset inCharset;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
       inCharset = java.nio.charset.Charset.forName(org.apache.drill.exec.expr.fn.impl.StringFunctionHelpers.toStringFromUTF8(enc.start, enc.end, enc.buffer));
     }
 
+    @Override
     public void eval() {
-      byte[] bytea = new byte[in.end - in.start];
-      int index =0;
-      for (int i = in.start; i<in.end; i++, index++) {
-        bytea[index]=in.buffer.getByte(i);
+      final byte[] bytea = new byte[in.end - in.start];
+      int index = 0;
+      for (int i = in.start; i < in.end; i++, index++) {
+        bytea[index] = in.buffer.getByte(i);
       }
-      byte[] outBytea = new String(bytea, inCharset).getBytes(com.google.common.base.Charsets.UTF_8);
+      final byte[] outBytea = new String(bytea, inCharset).getBytes(com.google.common.base.Charsets.UTF_8);
       out.buffer = buffer = buffer.reallocIfNeeded(outBytea.length);
       out.buffer.setBytes(0, outBytea);
       out.start = 0;
@@ -1122,14 +1625,15 @@ public class StringFunctions{
   */
   @FunctionTemplate(name = "reverse", scope = FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
   public static class ReverseString implements DrillSimpleFunc {
-
     @Param  VarCharHolder in;
     @Output VarCharHolder out;
     @Inject DrillBuf buffer;
 
-    public void setup(RecordBatch incoming) {
+    @Override
+    public void setup() {
     }
 
+    @Override
     public void eval() {
       final int len = in.end - in.start;
       out.start = 0;
@@ -1140,7 +1644,7 @@ public class StringFunctions{
       int index = in.end;
       int innerindex = 0;
 
-      for (int id = in.start; id < in.end; id+=charlen) {
+      for (int id = in.start; id < in.end; id += charlen) {
         innerindex = charlen = org.apache.drill.exec.expr.fn.impl.StringFunctionUtil.utf8CharLen(in.buffer, id);
 
         while (innerindex > 0) {
@@ -1152,5 +1656,4 @@ public class StringFunctions{
       }
     }
   }
-
 }

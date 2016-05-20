@@ -27,10 +27,13 @@ import org.apache.drill.exec.client.DrillClient;
 import org.apache.drill.exec.pop.PopUnitTestBase;
 import org.apache.drill.exec.record.RecordBatchLoader;
 import org.apache.drill.exec.record.VectorWrapper;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.server.Drillbit;
 import org.apache.drill.exec.server.RemoteServiceSet;
 import org.apache.drill.exec.vector.ValueVector;
+import org.joda.time.LocalDate;
+import org.joda.time.LocalTime;
+import org.joda.time.LocalDateTime;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -48,13 +51,13 @@ public class TestDateFunctions extends PopUnitTestBase {
             // run query.
             bit.run();
             client.connect();
-            List<QueryResultBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
+            List<QueryDataBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
                     Files.toString(FileUtils.getResourceAsFile(physicalPlan), Charsets.UTF_8)
                             .replace("#{TEST_FILE}", resourceFile));
 
             RecordBatchLoader batchLoader = new RecordBatchLoader(bit.getContext().getAllocator());
 
-            QueryResultBatch batch = results.get(1);
+            QueryDataBatch batch = results.get(0);
             assertTrue(batchLoader.load(batch.getHeader().getDef(), batch.getData()));
 
 
@@ -67,7 +70,7 @@ public class TestDateFunctions extends PopUnitTestBase {
             }
 
             batchLoader.clear();
-            for(QueryResultBatch b : results){
+            for(QueryDataBatch b : results){
                 b.release();
             }
         }
@@ -98,7 +101,6 @@ public class TestDateFunctions extends PopUnitTestBase {
 
         String[] expectedResults = {"P365D",
                                     "P-366DT-60S",
-                                    "PT10800S",
                                     "PT39600S"};
         testCommon(expectedResults, "/functions/date/date_difference_arithmetic.json", "/test_simple_date.json");
     }
@@ -134,10 +136,9 @@ public class TestDateFunctions extends PopUnitTestBase {
     @Test
     public void testToChar() throws Exception {
 
-        String expectedResults[] = {"2008-Feb-23",
-                                    "12 20 30",
-                                    "2008 Feb 23 12:00:00",
-                                    "2008-02-23 20:00:00 America/Los_Angeles"};
+        String expectedResults[] = {(new LocalDate(2008, 2, 23)).toString("yyyy-MMM-dd"),
+                                    (new LocalTime(12, 20, 30)).toString("HH mm ss"),
+                                    (new LocalDateTime(2008, 2, 23, 12, 0, 0)).toString("yyyy MMM dd HH:mm:ss")};
         testCommon(expectedResults, "/functions/date/to_char.json", "/test_simple_date.json");
     }
 

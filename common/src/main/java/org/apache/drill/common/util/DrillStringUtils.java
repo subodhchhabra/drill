@@ -53,11 +53,11 @@ public class DrillStringUtils {
   }
 
   /**
-   * Escapes the characters in a {@code String} using Java String rules.
+   * Escapes the characters in a {@code String} according to Java string literal
+   * rules.
    *
-   * Deals correctly with quotes and control-chars (tab, backslash, cr, ff, etc.)
-   *
-   * So a tab becomes the characters {@code '\\'} and
+   * Deals correctly with quotes and control-chars (tab, backslash, cr, ff,
+   * etc.) so, for example, a tab becomes the characters {@code '\\'} and
    * {@code 't'}.
    *
    * Example:
@@ -163,10 +163,10 @@ public class DrillStringUtils {
   public static int parseBinaryString(ByteBuf str, int strStart, int strEnd) {
     int length = (strEnd - strStart);
     int dstEnd = strStart;
-    for (int i = strStart; i < length ; i++) {
+    for (int i = strStart; i < strStart+length ; i++) {
       byte b = str.getByte(i);
       if (b == '\\'
-          && length > i+3
+          && strEnd > i+3
           && (str.getByte(i+1) == 'x' || str.getByte(i+1) == 'X')) {
         // ok, take next 2 hex digits.
         byte hd1 = str.getByte(i+2);

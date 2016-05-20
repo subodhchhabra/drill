@@ -30,7 +30,6 @@ import org.apache.drill.common.expression.ExpressionPosition;
 import org.apache.drill.common.expression.FieldReference;
 import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.types.TypeProtos.MajorType;
-import org.apache.drill.common.types.Types;
 import org.apache.drill.exec.compile.sig.RuntimeOverridden;
 import org.apache.drill.exec.exception.ClassTransformationException;
 import org.apache.drill.exec.exception.SchemaChangeException;
@@ -52,13 +51,11 @@ import org.apache.drill.exec.record.RecordBatch.IterOutcome;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.record.VectorWrapper;
+import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.FixedWidthVector;
 import org.apache.drill.exec.vector.ObjectVector;
-import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.VariableWidthVector;
-
-import com.google.common.collect.Lists;
 
 public abstract class HashAggTemplate implements HashAggregator {
   private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(HashAggregator.class);
@@ -131,34 +128,41 @@ public abstract class HashAggTemplate implements HashAggregator {
     private BatchHolder() {
 
       aggrValuesContainer = new VectorContainer();
+      boolean success = false;
+      try {
+        ValueVector vector;
 
-      ValueVector vector;
+        for (int i = 0; i < materializedValueFields.length; i++) {
+          MaterializedField outputField = materializedValueFields[i];
+          // Create a type-specific ValueVector for this value
+          vector = TypeHelper.getNewVector(outputField, allocator);
 
-      for (int i = 0; i < materializedValueFields.length; i++) {
-        MaterializedField outputField = materializedValueFields[i];
-        // Create a type-specific ValueVector for this value
-        vector = TypeHelper.getNewVector(outputField, allocator);
+          // Try to allocate space to store BATCH_SIZE records. Key stored at index i in HashTable has its workspace
+          // variables (such as count, sum etc) stored at index i in HashAgg. HashTable and HashAgg both have
+          // BatchHolders. Whenever a BatchHolder in HashAgg reaches its capacity, a new BatchHolder is added to
+          // HashTable. If HashAgg can't store BATCH_SIZE records in a BatchHolder, it leaves empty slots in current
+          // BatchHolder in HashTable, causing the HashTable to be space inefficient. So it is better to allocate space
+          // to fit as close to as BATCH_SIZE records.
+          if (vector instanceof FixedWidthVector) {
+            ((FixedWidthVector) vector).allocateNew(HashTable.BATCH_SIZE);
+          } else if (vector instanceof VariableWidthVector) {
+            ((VariableWidthVector) vector).allocateNew(HashTable.VARIABLE_WIDTH_VECTOR_SIZE * HashTable.BATCH_SIZE,
+                HashTable.BATCH_SIZE);
+          } else if (vector instanceof ObjectVector) {
+            ((ObjectVector) vector).allocateNew(HashTable.BATCH_SIZE);
+          } else {
+            vector.allocateNew();
+          }
 
-        // Try to allocate space to store BATCH_SIZE records. Key stored at index i in HashTable has its workspace
-        // variables (such as count, sum etc) stored at index i in HashAgg. HashTable and HashAgg both have
-        // BatchHolders. Whenever a BatchHolder in HashAgg reaches its capacity, a new BatchHolder is added to
-        // HashTable. If HashAgg can't store BATCH_SIZE records in a BatchHolder, it leaves empty slots in current
-        // BatchHolder in HashTable, causing the HashTable to be space inefficient. So it is better to allocate space
-        // to fit as close to as BATCH_SIZE records.
-        if (vector instanceof FixedWidthVector) {
-          ((FixedWidthVector) vector).allocateNew(HashTable.BATCH_SIZE);
-        } else if (vector instanceof VariableWidthVector) {
-          ((VariableWidthVector) vector).allocateNew(HashTable.VARIABLE_WIDTH_VECTOR_SIZE * HashTable.BATCH_SIZE,
-              HashTable.BATCH_SIZE);
-        } else if (vector instanceof ObjectVector) {
-          ((ObjectVector) vector).allocateNew(HashTable.BATCH_SIZE);
-        } else {
-          vector.allocateNew();
+          capacity = Math.min(capacity, vector.getValueCapacity());
+
+          aggrValuesContainer.add(vector);
         }
-
-        capacity = Math.min(capacity, vector.getValueCapacity());
-
-        aggrValuesContainer.add(vector);
+        success = true;
+      } finally {
+        if (!success) {
+          aggrValuesContainer.clear();
+        }
       }
     }
 
@@ -243,7 +247,7 @@ public abstract class HashAggTemplate implements HashAggregator {
     //      e.g SELECT COUNT(DISTINCT a1) FROM t1 ;
     // we need to build a hash table on the aggregation column a1.
     // TODO:  This functionality will be added later.
-    if (hashAggrConfig.getGroupByExprs().length == 0) {
+    if (hashAggrConfig.getGroupByExprs().size() == 0) {
       throw new IllegalArgumentException("Currently, hash aggregation is only applicable if there are group-by " +
           "expressions.");
     }
@@ -259,7 +263,7 @@ public abstract class HashAggTemplate implements HashAggregator {
       FieldReference ref =
           new FieldReference("dummy", ExpressionPosition.UNKNOWN, valueFieldIds.get(0).getIntermediateType());
       for (TypedFieldId id : valueFieldIds) {
-        materializedValueFields[i++] = MaterializedField.create(ref, id.getIntermediateType());
+        materializedValueFields[i++] = MaterializedField.create(ref.getAsNamePart().getName(), id.getIntermediateType());
       }
     }
 
@@ -312,6 +316,7 @@ public abstract class HashAggTemplate implements HashAggregator {
               logger.debug("Received IterOutcome of {}", out);
             }
             switch (out) {
+              case OUT_OF_MEMORY:
               case NOT_YET:
                 this.outcome = out;
                 return AggOutcome.RETURN_OUTCOME;
@@ -351,10 +356,6 @@ public abstract class HashAggTemplate implements HashAggregator {
 
                 outputCurrentBatch();
 
-                // cleanup incoming batch since output of aggregation does not need
-                // any references to the incoming
-
-                incoming.cleanup();
                 // return setOkAndReturn();
                 return AggOutcome.RETURN_OUTCOME;
 

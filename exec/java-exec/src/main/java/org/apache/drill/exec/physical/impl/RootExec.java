@@ -17,17 +17,13 @@
  */
 package org.apache.drill.exec.physical.impl;
 
-
-import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
 
 /**
  * A FragmentRoot is a node which is the last processing node in a query plan. FragmentTerminals include Exchange
  * output nodes and storage nodes.  They are there driving force behind the completion of a query.
  */
-public interface RootExec {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(RootExec.class);
-
+public interface RootExec extends AutoCloseable {
   /**
    * Do the next batch of work.
    * @return Whether or not additional batches of work are necessary.  False means that this fragment is done.
@@ -35,14 +31,8 @@ public interface RootExec {
   public boolean next();
 
   /**
-   * Inform all children to clean up and go away.
-   */
-  public void stop();
-
-  /**
    * Inform sender that receiving fragment is finished and doesn't need any more data
    * @param handle
    */
   public void receivingFragmentFinished(FragmentHandle handle);
-
 }

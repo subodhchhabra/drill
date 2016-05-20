@@ -1,11 +1,10 @@
 /**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with this
+ * work for additional information regarding copyright ownership.  The ASF
+ * licenses this file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -17,23 +16,53 @@
  */
 package org.apache.drill.jdbc;
 
-import net.hydromatic.avatica.AvaticaStatement;
+import java.sql.SQLFeatureNotSupportedException;
+import java.sql.Statement;
 
-public abstract class DrillStatement extends AvaticaStatement implements DrillRemoteStatement {
 
-  DrillStatement(DrillConnectionImpl connection, int resultSetType, int resultSetConcurrency, int resultSetHoldability) {
-    super(connection, resultSetType, resultSetConcurrency, resultSetHoldability);
-  }
+/**
+ * Drill-specific {@link Statement}.
+ * @see #unwrap
+ */
+public interface DrillStatement extends Statement {
 
+  /**
+   * <strong>Drill</strong>:
+   * Returns zero, indicating that no timeout is set.
+   *
+   * @throws  AlreadyClosedSqlException
+   *            if connection is closed
+   */
   @Override
-  public DrillConnectionImpl getConnection() {
-    return (DrillConnectionImpl) connection;
-  }
+  int getQueryTimeout() throws AlreadyClosedSqlException;
 
+  /**
+   * <strong>Drill</strong>:
+   * Not supported (for non-zero timeout value).
+   * <p>
+   *   Normally, just throws {@link SQLFeatureNotSupportedException} unless
+   *   request is trivially for no timeout (zero {@code milliseconds} value).
+   * </p>
+   * @throws  AlreadyClosedSqlException
+   *            if connection is closed
+   * @throws  JdbcApiSqlException
+   *            if an invalid parameter value is detected (and not above case)
+   * @throws  SQLFeatureNotSupportedException
+   *            if timeout is non-zero (and not above case)
+   */
   @Override
-  public void cleanup() {
-    final DrillConnectionImpl connection1 = (DrillConnectionImpl) connection;
-    connection1.registry.removeStatement(this);
-  }
+  void setQueryTimeout( int milliseconds )
+      throws AlreadyClosedSqlException,
+             JdbcApiSqlException,
+             SQLFeatureNotSupportedException;
+
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>: Does not throw SQLException.
+   * </p>
+   */
+  @Override
+  boolean isClosed();
 
 }

@@ -17,26 +17,26 @@
  ******************************************************************************/
 package org.apache.drill.exec.planner.physical.visitor;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexCorrelVariable;
+import org.apache.calcite.rex.RexDynamicParam;
+import org.apache.calcite.rex.RexFieldAccess;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexLocalRef;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexOver;
+import org.apache.calcite.rex.RexRangeRef;
+import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
 import org.apache.drill.exec.planner.physical.ProjectPrel;
 import org.apache.drill.exec.planner.types.RelDataTypeDrillImpl;
 import org.apache.drill.exec.planner.types.RelDataTypeHolder;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.rex.RexBuilder;
-import org.eigenbase.rex.RexCall;
-import org.eigenbase.rex.RexCorrelVariable;
-import org.eigenbase.rex.RexDynamicParam;
-import org.eigenbase.rex.RexFieldAccess;
-import org.eigenbase.rex.RexInputRef;
-import org.eigenbase.rex.RexLiteral;
-import org.eigenbase.rex.RexLocalRef;
-import org.eigenbase.rex.RexNode;
-import org.eigenbase.rex.RexOver;
-import org.eigenbase.rex.RexRangeRef;
-import org.eigenbase.rex.RexVisitorImpl;
-
-import java.util.ArrayList;
-import java.util.List;
 
 public class RexVisitorComplexExprSplitter extends RexVisitorImpl<RexNode> {
 
@@ -50,7 +50,7 @@ public class RexVisitorComplexExprSplitter extends RexVisitorImpl<RexNode> {
     super(true);
     this.factory = factory;
     this.funcReg = funcReg;
-    this.complexExprs = new ArrayList();
+    this.complexExprs = new ArrayList<>();
     this.lastUsedIndex = firstUnused;
   }
 
@@ -83,11 +83,12 @@ public class RexVisitorComplexExprSplitter extends RexVisitorImpl<RexNode> {
     return correlVariable;
   }
 
+  @Override
   public RexNode visitCall(RexCall call) {
 
     String functionName = call.getOperator().getName();
 
-    List<RexNode> newOps = new ArrayList();
+    List<RexNode> newOps = new ArrayList<>();
     for (RexNode operand : call.operands) {
       newOps.add(operand.accept(this));
     }

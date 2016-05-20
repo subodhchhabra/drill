@@ -17,36 +17,42 @@
  */
 package org.apache.drill.exec.store.dfs;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import net.hydromatic.optiq.Function;
-import net.hydromatic.optiq.Schema;
-import net.hydromatic.optiq.SchemaPlus;
-import net.hydromatic.optiq.Table;
+import org.apache.calcite.schema.Function;
+import org.apache.calcite.schema.Schema;
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.Table;
 
+import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.exec.ops.QueryContext;
 import org.apache.drill.exec.planner.logical.CreateTableEntry;
-import org.apache.drill.exec.rpc.user.UserSession;
 import org.apache.drill.exec.store.AbstractSchema;
+import org.apache.drill.exec.store.PartitionNotFoundException;
+import org.apache.drill.exec.store.SchemaConfig;
 import org.apache.drill.exec.store.SchemaFactory;
 import org.apache.drill.exec.store.dfs.WorkspaceSchemaFactory.WorkspaceSchema;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.Path;
 
 
 /**
  * This is the top level schema that responds to root level path requests. Also supports
  */
 public class FileSystemSchemaFactory implements SchemaFactory{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FileSystemSchemaFactory.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FileSystemSchemaFactory.class);
+
+  public static final String DEFAULT_WS_NAME = "default";
 
   private List<WorkspaceSchemaFactory> factories;
   private String schemaName;
-  private final String defaultSchemaName = "default";
-
 
   public FileSystemSchemaFactory(String schemaName, List<WorkspaceSchemaFactory> factories) {
     super();
@@ -55,8 +61,8 @@ public class FileSystemSchemaFactory implements SchemaFactory{
   }
 
   @Override
-  public void registerSchemas(UserSession session, SchemaPlus parent) {
-    FileSystemSchema schema = new FileSystemSchema(schemaName, session);
+  public void registerSchemas(SchemaConfig schemaConfig, SchemaPlus parent) throws IOException {
+    FileSystemSchema schema = new FileSystemSchema(schemaName, schemaConfig);
     SchemaPlus plusOfThis = parent.add(schema.getName(), schema);
     schema.setPlus(plusOfThis);
   }
@@ -66,20 +72,36 @@ public class FileSystemSchemaFactory implements SchemaFactory{
     private final WorkspaceSchema defaultSchema;
     private final Map<String, WorkspaceSchema> schemaMap = Maps.newHashMap();
 
-    public FileSystemSchema(String name, UserSession session) {
+    public FileSystemSchema(String name, SchemaConfig schemaConfig) throws IOException {
       super(ImmutableList.<String>of(), name);
       for(WorkspaceSchemaFactory f :  factories){
-        WorkspaceSchema s = f.createSchema(getSchemaPath(), session);
-        schemaMap.put(s.getName(), s);
+        if (f.accessible(schemaConfig.getUserName())) {
+          WorkspaceSchema s = f.createSchema(getSchemaPath(), schemaConfig);
+          schemaMap.put(s.getName(), s);
+        }
       }
 
-      defaultSchema = schemaMap.get(defaultSchemaName);
+      defaultSchema = schemaMap.get(DEFAULT_WS_NAME);
     }
 
     void setPlus(SchemaPlus plusOfThis){
       for(WorkspaceSchema s : schemaMap.values()){
         plusOfThis.add(s.getName(), s);
       }
+    }
+
+    @Override
+    public Iterable<String> getSubPartitions(String table,
+                                             List<String> partitionColumns,
+                                             List<String> partitionValues
+                                            ) throws PartitionNotFoundException {
+      List<FileStatus> fileStatuses;
+      try {
+        fileStatuses = defaultSchema.getFS().list(false, new Path(defaultSchema.getDefaultLocation(), table));
+      } catch (IOException e) {
+        throw new PartitionNotFoundException("Error finding partitions for table " + table, e);
+      }
+      return new SubDirectoryList(fileStatuses);
     }
 
     @Override
@@ -108,7 +130,7 @@ public class FileSystemSchemaFactory implements SchemaFactory{
     }
 
     @Override
-    public Schema getSubSchema(String name) {
+    public AbstractSchema getSubSchema(String name) {
       return schemaMap.get(name);
     }
 
@@ -128,8 +150,8 @@ public class FileSystemSchemaFactory implements SchemaFactory{
     }
 
     @Override
-    public CreateTableEntry createNewTable(String tableName) {
-      return defaultSchema.createNewTable(tableName);
+    public CreateTableEntry createNewTable(String tableName, List<String> partitionColumns) {
+      return defaultSchema.createNewTable(tableName, partitionColumns);
     }
 
     @Override

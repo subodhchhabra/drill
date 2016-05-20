@@ -24,7 +24,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.drill.common.expression.FunctionCall;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import org.apache.drill.common.expression.MajorTypeInLogicalExpression;
+import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.types.TypeProtos.DataMode;
 import org.apache.drill.common.types.TypeProtos.MajorType;
 import org.apache.drill.common.types.TypeProtos.MinorType;
@@ -426,7 +429,6 @@ public class TypeCastRules {
     rule.add(MinorType.UINT4);
     rule.add(MinorType.UINT8);
     rule.add(MinorType.DATE);
-    rule.add(MinorType.TIME);
     rule.add(MinorType.TIMESTAMPTZ);
     rules.put(MinorType.TIMESTAMP, rule);
 
@@ -546,30 +548,12 @@ public class TypeCastRules {
     /** BIT cast able from **/
     rule = new HashSet<MinorType>();
     rule.add(MinorType.TINYINT);
-    rule.add(MinorType.SMALLINT);
-    rule.add(MinorType.INT);
-    rule.add(MinorType.BIGINT);
-    rule.add(MinorType.UINT1);
-    rule.add(MinorType.UINT2);
-    rule.add(MinorType.UINT4);
-    rule.add(MinorType.UINT8);
-    rule.add(MinorType.DECIMAL9);
-    rule.add(MinorType.DECIMAL18);
-    rule.add(MinorType.DECIMAL28SPARSE);
-    rule.add(MinorType.DECIMAL28DENSE);
-    rule.add(MinorType.DECIMAL38SPARSE);
-    rule.add(MinorType.DECIMAL38DENSE);
-    rule.add(MinorType.MONEY);
-    rule.add(MinorType.TIMESTAMPTZ);
-    rule.add(MinorType.FLOAT4);
-    rule.add(MinorType.FLOAT8);
     rule.add(MinorType.BIT);
     rule.add(MinorType.FIXEDCHAR);
     rule.add(MinorType.FIXED16CHAR);
     rule.add(MinorType.VARCHAR);
     rule.add(MinorType.VAR16CHAR);
     rule.add(MinorType.VARBINARY);
-    rule.add(MinorType.FIXEDBINARY);
     rules.put(MinorType.BIT, rule);
 
     /** FIXEDCHAR cast able from **/
@@ -769,6 +753,8 @@ public class TypeCastRules {
     rule.add(MinorType.VARBINARY);
     rule.add(MinorType.FIXEDBINARY);
     rules.put(MinorType.VARBINARY, rule);
+
+    rules.put(MinorType.UNION, Sets.newHashSet(MinorType.UNION));
   }
 
   public static boolean isCastableWithNullHandling(MajorType from, MajorType to, NullHandling nullHandling) {
@@ -804,17 +790,23 @@ public class TypeCastRules {
     }
   }
 
-    /*
+  /*
    * Function checks if casting is allowed from the 'from' -> 'to' minor type. If its allowed
    * we also check if the precedence map allows such a cast and return true if both cases are satisfied
    */
   public static MinorType getLeastRestrictiveType(List<MinorType> types) {
     assert types.size() >= 2;
     MinorType result = types.get(0);
+    if (result == MinorType.UNION) {
+      return result;
+    }
     int resultPrec = ResolverTypePrecedence.precedenceMap.get(result);
 
     for (int i = 1; i < types.size(); i++) {
       MinorType next = types.get(i);
+      if (next == MinorType.UNION) {
+        return next;
+      }
       if (next == result) {
         // both args are of the same type; continue
         continue;
@@ -843,10 +835,10 @@ public class TypeCastRules {
    * implicit cast > 0: cost associated with implicit cast. ==0: parms are
    * exactly same type of arg. No need of implicit.
    */
-  public static int getCost(FunctionCall call, DrillFuncHolder holder) {
+  public static int getCost(List<MajorType> argumentTypes, DrillFuncHolder holder) {
     int cost = 0;
 
-    if (call.args.size() != holder.getParamCount()) {
+    if (argumentTypes.size() != holder.getParamCount()) {
       return -1;
     }
 
@@ -861,19 +853,30 @@ public class TypeCastRules {
      * the function can fit the precision that we need based on the input types.
      */
     if (holder.checkPrecisionRange() == true) {
-      if (DecimalUtility.getMaxPrecision(holder.getReturnType().getMinorType()) < holder.getReturnType(call.args).getPrecision()) {
+      List<LogicalExpression> logicalExpressions = Lists.newArrayList();
+      for(MajorType majorType : argumentTypes) {
+        logicalExpressions.add(
+            new MajorTypeInLogicalExpression(majorType));
+      }
+
+      if (DecimalUtility.getMaxPrecision(holder.getReturnType().getMinorType()) <
+          holder.getReturnType(logicalExpressions).getPrecision()) {
         return -1;
       }
     }
 
-    for (int i = 0; i < holder.getParamCount(); i++) {
-      MajorType argType = call.args.get(i).getMajorType();
-      MajorType parmType = holder.getParmMajorType(i);
+    final int numOfArgs = holder.getParamCount();
+    for (int i = 0; i < numOfArgs; i++) {
+      final MajorType argType = argumentTypes.get(i);
+      final MajorType parmType = holder.getParmMajorType(i);
 
       //@Param FieldReader will match any type
       if (holder.isFieldReader(i)) {
 //        if (Types.isComplex(call.args.get(i).getMajorType()) ||Types.isRepeated(call.args.get(i).getMajorType()) )
-          continue;
+        // add the max cost when encountered with a field reader considering that it is the most expensive factor
+        // contributing to the cost.
+        cost += ResolverTypePrecedence.MAX_IMPLICIT_CAST_COST;
+        continue;
 //        else
 //          return -1;
       }
@@ -959,6 +962,31 @@ public class TypeCastRules {
     }
 
     return cost;
+  }
+
+  /*
+   * Simple helper function to determine if input type is numeric
+   */
+  public static boolean isNumericType(MinorType inputType) {
+    switch (inputType) {
+      case TINYINT:
+      case SMALLINT:
+      case INT:
+      case BIGINT:
+      case UINT1:
+      case UINT2:
+      case UINT4:
+      case UINT8:
+      case DECIMAL9:
+      case DECIMAL18:
+      case DECIMAL28SPARSE:
+      case DECIMAL38SPARSE:
+      case FLOAT4:
+      case FLOAT8:
+        return true;
+      default:
+        return false;
+    }
   }
 
 }

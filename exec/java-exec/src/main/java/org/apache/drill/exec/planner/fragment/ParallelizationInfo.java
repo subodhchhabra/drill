@@ -96,8 +96,8 @@ public class ParallelizationInfo {
     private final Map<DrillbitEndpoint, EndpointAffinity> affinityMap = Maps.newHashMap();
 
     public void add(ParallelizationInfo parallelizationInfo) {
-      this.minWidth = Math.max(minWidth, parallelizationInfo.minWidth);
-      this.maxWidth = Math.min(maxWidth, parallelizationInfo.maxWidth);
+      minWidth = Math.max(minWidth, parallelizationInfo.minWidth);
+      maxWidth = Math.min(maxWidth, parallelizationInfo.maxWidth);
 
       Map<DrillbitEndpoint, EndpointAffinity> affinityMap = parallelizationInfo.getEndpointAffinityMap();
       for(Map.Entry<DrillbitEndpoint, EndpointAffinity> epAff : affinityMap.entrySet()) {
@@ -106,7 +106,11 @@ public class ParallelizationInfo {
     }
 
     public void addMaxWidth(int newMaxWidth) {
-      this.maxWidth = Math.min(maxWidth, newMaxWidth);
+      maxWidth = Math.min(maxWidth, newMaxWidth);
+    }
+
+    public void addMinWidth(int newMinWidth) {
+      minWidth = Math.max(minWidth, newMinWidth);
     }
 
     public void addEndpointAffinities(List<EndpointAffinity> endpointAffinities) {
@@ -117,8 +121,13 @@ public class ParallelizationInfo {
 
     // Helper method to add the given EndpointAffinity to the global affinity map
     private void addEndpointAffinity(EndpointAffinity epAff) {
-      if (affinityMap.containsKey(epAff.getEndpoint())) {
-        affinityMap.get(epAff.getEndpoint()).addAffinity(epAff.getAffinity());
+      final EndpointAffinity epAffAgg = affinityMap.get(epAff.getEndpoint());
+      if (epAffAgg != null) {
+        epAffAgg.addAffinity(epAff.getAffinity());
+        if (epAff.isAssignmentRequired()) {
+          epAffAgg.setAssignmentRequired();
+        }
+        epAffAgg.setMaxWidth(epAff.getMaxWidth());
       } else {
         affinityMap.put(epAff.getEndpoint(), epAff);
       }

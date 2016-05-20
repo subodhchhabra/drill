@@ -17,13 +17,38 @@
  */
 package org.apache.drill.exec.rpc.user;
 
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.exec.proto.UserBitShared.QueryId;
-import org.apache.drill.exec.rpc.RpcException;
+import org.apache.drill.exec.proto.UserBitShared.QueryResult.QueryState;
+import org.apache.drill.exec.rpc.ConnectionThrottle;
 
 public interface UserResultsListener {
 
-  public abstract void queryIdArrived(QueryId queryId);
-  public abstract void submissionFailed(RpcException ex);
-  public abstract void resultArrived(QueryResultBatch result, ConnectionThrottle throttle);
+  /**
+   * QueryId is available. Called when a query is successfully submitted to the server.
+   * @param queryId sent by the server along {@link org.apache.drill.exec.rpc.Acks.OK Acks.OK}
+   */
+  void queryIdArrived(QueryId queryId);
+
+  /**
+   * The query has failed. Most likely called when the server returns a FAILED query state. Can also be called if
+   * {@link #dataArrived(QueryDataBatch, ConnectionThrottle) dataArrived()} throws an exception
+   * @param ex exception describing the cause of the failure
+   */
+  void submissionFailed(UserException ex);
+
+  /**
+   * A {@link org.apache.drill.exec.proto.beans.QueryData QueryData} message was received
+   * @param result data batch received
+   * @param throttle connection throttle
+   */
+  void dataArrived(QueryDataBatch result, ConnectionThrottle throttle);
+
+  /**
+   * The query has completed (successsful completion or cancellation). The listener will not receive any other
+   * data or result message. Called when the server returns a terminal-non failing- state (COMPLETED or CANCELLED)
+   * @param state
+   */
+  void queryCompleted(QueryState state);
 
 }

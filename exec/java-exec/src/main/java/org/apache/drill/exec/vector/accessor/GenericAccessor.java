@@ -20,6 +20,7 @@ package org.apache.drill.exec.vector.accessor;
 import org.apache.drill.common.types.TypeProtos;
 import org.apache.drill.exec.vector.ValueVector;
 
+
 public class GenericAccessor extends AbstractSqlAccessor {
 
   private ValueVector v;
@@ -29,8 +30,13 @@ public class GenericAccessor extends AbstractSqlAccessor {
   }
 
   @Override
+  public Class<?> getObjectClass() {
+    return Object.class;
+  }
+
+  @Override
   public boolean isNull(int index) {
-    throw new UnsupportedOperationException();
+    return v.getAccessor().isNull(index);
   }
 
   @Override
@@ -39,7 +45,7 @@ public class GenericAccessor extends AbstractSqlAccessor {
   }
 
   @Override
-  TypeProtos.MajorType getType() {
+  public TypeProtos.MajorType getType() {
     return v.getMetadata().getMajorType();
   }
 }

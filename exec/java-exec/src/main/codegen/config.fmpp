@@ -15,6 +15,7 @@
 # limitations under the License.
 
 data: {
+    # TODO:  Rename to ~valueVectorModesAndTypes for clarity.
     vv:                       tdd(../data/ValueVectorTypes.tdd),
 
     # Most types for comparison functions (for templates/ComparisonFunctions.java).
@@ -42,7 +43,8 @@ data: {
     extract:                  tdd(../data/ExtractTypes.tdd),
     sumzero:                  tdd(../data/SumZero.tdd),
     numericTypes:             tdd(../data/NumericTypes.tdd),
-    casthigh:                 tdd(../data/CastHigh.tdd)
+    casthigh:                 tdd(../data/CastHigh.tdd),
+    countAggrTypes:           tdd(../data/CountAggrTypes.tdd)
 }
 freemarkerLinks: {
     includes: includes/

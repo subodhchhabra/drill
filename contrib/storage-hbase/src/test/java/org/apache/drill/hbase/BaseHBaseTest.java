@@ -23,7 +23,7 @@ import java.util.List;
 import org.apache.drill.BaseTestQuery;
 import org.apache.drill.common.util.FileUtils;
 import org.apache.drill.exec.exception.SchemaChangeException;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.store.StoragePluginRegistry;
 import org.apache.drill.exec.store.hbase.HBaseStoragePlugin;
 import org.apache.drill.exec.store.hbase.HBaseStoragePluginConfig;
@@ -46,8 +46,11 @@ public class BaseHBaseTest extends BaseTestQuery {
 
   protected static HBaseStoragePluginConfig storagePluginConfig;
 
+
   @BeforeClass
-  public static void setUpBeforeClass() throws Exception {
+  public static void setupDefaultTestCluster() throws Exception {
+    GuavaPatcher.patch();
+
     /*
      * Change the following to HBaseTestsSuite.configure(false, true)
      * if you want to test against an externally running HBase cluster.
@@ -55,12 +58,15 @@ public class BaseHBaseTest extends BaseTestQuery {
     HBaseTestsSuite.configure(true, true);
     HBaseTestsSuite.initCluster();
 
+    BaseTestQuery.setupDefaultTestCluster();
+
     final StoragePluginRegistry pluginRegistry = getDrillbitContext().getStorage();
     storagePlugin = (HBaseStoragePlugin) pluginRegistry.getPlugin(HBASE_STORAGE_PLUGIN_NAME);
     storagePluginConfig = storagePlugin.getConfig();
     storagePluginConfig.setEnabled(true);
     storagePluginConfig.setZookeeperPort(HBaseTestsSuite.getZookeeperPort());
     pluginRegistry.createOrUpdate(HBASE_STORAGE_PLUGIN_NAME, storagePluginConfig, true);
+
   }
 
   @AfterClass
@@ -76,22 +82,22 @@ public class BaseHBaseTest extends BaseTestQuery {
 
   protected void runHBasePhysicalVerifyCount(String planFile, String tableName, int expectedRowCount) throws Exception{
     String physicalPlan = getPlanText(planFile, tableName);
-    List<QueryResultBatch> results = testPhysicalWithResults(physicalPlan);
+    List<QueryDataBatch> results = testPhysicalWithResults(physicalPlan);
     printResultAndVerifyRowCount(results, expectedRowCount);
   }
 
-  protected List<QueryResultBatch> runHBaseSQLlWithResults(String sql) throws Exception {
+  protected List<QueryDataBatch> runHBaseSQLlWithResults(String sql) throws Exception {
     sql = canonizeHBaseSQL(sql);
     System.out.println("Running query:\n" + sql);
     return testSqlWithResults(sql);
   }
 
   protected void runHBaseSQLVerifyCount(String sql, int expectedRowCount) throws Exception{
-    List<QueryResultBatch> results = runHBaseSQLlWithResults(sql);
+    List<QueryDataBatch> results = runHBaseSQLlWithResults(sql);
     printResultAndVerifyRowCount(results, expectedRowCount);
   }
 
-  private void printResultAndVerifyRowCount(List<QueryResultBatch> results, int expectedRowCount) throws SchemaChangeException {
+  private void printResultAndVerifyRowCount(List<QueryDataBatch> results, int expectedRowCount) throws SchemaChangeException {
     int rowCount = printResult(results);
     if (expectedRowCount != -1) {
       Assert.assertEquals(expectedRowCount, rowCount);
@@ -101,5 +107,7 @@ public class BaseHBaseTest extends BaseTestQuery {
   protected String canonizeHBaseSQL(String sql) {
     return sql.replace("[TABLE_NAME]", HBaseTestsSuite.TEST_TABLE_1);
   }
+
+
 
 }

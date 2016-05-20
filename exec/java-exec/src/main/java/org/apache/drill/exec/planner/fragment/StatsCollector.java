@@ -85,7 +85,9 @@ public class StatsCollector extends AbstractOpWrapperVisitor<Void, RuntimeExcept
 
   @Override
   public Void visitGroupScan(GroupScan groupScan, Wrapper wrapper) {
-    wrapper.getStats().addMaxWidth(groupScan.getMaxParallelizationWidth());
+    final Stats stats = wrapper.getStats();
+    stats.addMaxWidth(groupScan.getMaxParallelizationWidth());
+    stats.addMinWidth(groupScan.getMinParallelizationWidth());
     return super.visitGroupScan(groupScan, wrapper);
   }
 
@@ -99,7 +101,9 @@ public class StatsCollector extends AbstractOpWrapperVisitor<Void, RuntimeExcept
   public Void visitOp(PhysicalOperator op, Wrapper wrapper) {
     final Stats stats = wrapper.getStats();
     if (op instanceof HasAffinity) {
-      stats.addEndpointAffinities(((HasAffinity)op).getOperatorAffinity());
+      final HasAffinity hasAffinity = (HasAffinity)op;
+      stats.addEndpointAffinities(hasAffinity.getOperatorAffinity());
+      stats.setDistributionAffinity(hasAffinity.getDistributionAffinity());
     }
     stats.addCost(op.getCost());
     for (PhysicalOperator child : op) {

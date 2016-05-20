@@ -27,7 +27,7 @@ import org.apache.drill.BaseTestQuery;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.record.RecordBatchLoader;
 import org.apache.drill.exec.record.VectorWrapper;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.vector.ValueVector;
 import org.junit.Test;
 
@@ -41,45 +41,49 @@ public class TestTextColumn extends BaseTestQuery{
 
   @Test
   public void testDefaultDelimiterColumnSelection() throws Exception {
-    List<QueryResultBatch> batches = testSqlWithResults("SELECT columns[0] as entire_row " +
+    List<QueryDataBatch> batches = testSqlWithResults("SELECT columns[0] as entire_row " +
       "from dfs_test.`[WORKING_PATH]/src/test/resources/store/text/data/letters.txt`");
 
     List<List<String>> expectedOutput = Arrays.asList(
-      Arrays.asList("\"a, b,\",\"c\",\"d,, \\n e\""),
-      Arrays.asList("\"d, e,\",\"f\",\"g,, \\n h\""),
-      Arrays.asList("\"g, h,\",\"i\",\"j,, \\n k\""));
+      Arrays.asList("a, b,\",\"c\",\"d,, \\n e"),
+      Arrays.asList("d, e,\",\"f\",\"g,, \\n h"),
+      Arrays.asList("g, h,\",\"i\",\"j,, \\n k"));
 
     List<List<String>> actualOutput = getOutput(batches);
+    System.out.println(actualOutput);
     validateOutput(expectedOutput, actualOutput);
   }
 
   @Test
   public void testCsvColumnSelectionCommasInsideQuotes() throws Exception {
-    List<QueryResultBatch> batches = testSqlWithResults("SELECT columns[0] as col1, columns[1] as col2, columns[2] as col3," +
+    List<QueryDataBatch> batches = testSqlWithResults("SELECT columns[0] as col1, columns[1] as col2, columns[2] as col3," +
       "columns[3] as col4 from dfs_test.`[WORKING_PATH]/src/test/resources/store/text/data/letters.csv`");
 
     List<List<String>> expectedOutput = Arrays.asList(
-      Arrays.asList("\"a, b,\"", "\"c\"", "\"d,, \\n e\"","\"f\\\"g\""),
-      Arrays.asList("\"d, e,\"", "\"f\"", "\"g,, \\n h\"","\"i\\\"j\""),
-      Arrays.asList("\"g, h,\"", "\"i\"", "\"j,, \\n k\"","\"l\\\"m\""));
+      Arrays.asList("a, b,", "c", "d,, \\n e","f\\\"g"),
+      Arrays.asList("d, e,", "f", "g,, \\n h","i\\\"j"),
+      Arrays.asList("g, h,", "i", "j,, \\n k","l\\\"m"));
 
     List<List<String>> actualOutput = getOutput(batches);
     validateOutput(expectedOutput, actualOutput);
   }
 
-  private List<List<String>> getOutput(List<QueryResultBatch> batches) throws SchemaChangeException {
+  private List<List<String>> getOutput(List<QueryDataBatch> batches) throws SchemaChangeException {
     List<List<String>> output = new ArrayList<>();
     RecordBatchLoader loader = new RecordBatchLoader(getAllocator());
     int last = 0;
-    for(QueryResultBatch batch : batches) {
+    for(QueryDataBatch batch : batches) {
       int rows = batch.getHeader().getRowCount();
       if(batch.getData() != null) {
         loader.load(batch.getHeader().getDef(), batch.getData());
+        // TODO:  Clean:  DRILL-2933:  That load(...) no longer throws
+        // SchemaChangeException, so check/clean throws clause above.
         for (int i = 0; i < rows; ++i) {
           output.add(new ArrayList<String>());
           for (VectorWrapper<?> vw: loader) {
             ValueVector.Accessor accessor = vw.getValueVector().getAccessor();
-            output.get(last).add(accessor.getObject(i).toString());
+            Object o = accessor.getObject(i);
+            output.get(last).add(o == null ? null: o.toString());
           }
           ++last;
         }

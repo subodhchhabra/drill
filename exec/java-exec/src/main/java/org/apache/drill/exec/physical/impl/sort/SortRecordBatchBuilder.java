@@ -17,14 +17,15 @@
  */
 package org.apache.drill.exec.physical.impl.sort;
 
+import io.netty.buffer.DrillBuf;
+
 import java.util.ArrayList;
 import java.util.List;
 
-import io.netty.buffer.DrillBuf;
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.exec.exception.SchemaChangeException;
+import org.apache.drill.exec.memory.AllocationReservation;
 import org.apache.drill.exec.memory.BufferAllocator;
-import org.apache.drill.exec.memory.BufferAllocator.PreAllocator;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.record.BatchSchema;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
@@ -39,21 +40,20 @@ import org.apache.drill.exec.vector.ValueVector;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Lists;
 
-public class SortRecordBatchBuilder {
+public class SortRecordBatchBuilder implements AutoCloseable {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SortRecordBatchBuilder.class);
 
   private final ArrayListMultimap<BatchSchema, RecordBatchData> batches = ArrayListMultimap.create();
 
   private int recordCount;
-  private long runningBytes;
   private long runningBatches;
-  private final long maxBytes;
   private SelectionVector4 sv4;
-  final PreAllocator svAllocator;
+  private BufferAllocator allocator;
+  final AllocationReservation reservation;
 
-  public SortRecordBatchBuilder(BufferAllocator a, long maxBytes) {
-    this.maxBytes = maxBytes;
-    this.svAllocator = a.getNewPreAllocator();
+  public SortRecordBatchBuilder(BufferAllocator a) {
+    this.allocator = a;
+    this.reservation = a.newReservation();
   }
 
   private long getSize(VectorAccessible batch) {
@@ -83,19 +83,16 @@ public class SortRecordBatchBuilder {
     if (batchBytes == 0 && batches.size() > 0) {
       return true;
     }
-    if (batchBytes + runningBytes > maxBytes) {
-      return false; // enough data memory.
-    }
-    if (runningBatches+1 > Character.MAX_VALUE) {
+    if (runningBatches >= Character.MAX_VALUE) {
       return false; // allowed in batch.
     }
-    if (!svAllocator.preAllocate(batch.getRecordCount()*4)) {
+    if (!reservation.add(batch.getRecordCount() * 4)) {
       return false;  // sv allocation available.
     }
 
 
-    RecordBatchData bd = new RecordBatchData(batch);
-    runningBytes += batchBytes;
+    RecordBatchData bd = new RecordBatchData(batch, allocator);
+    runningBatches++;
     batches.put(batch.getSchema(), bd);
     recordCount += bd.getRecordCount();
     return true;
@@ -107,18 +104,12 @@ public class SortRecordBatchBuilder {
       return;
     }
 
-    if(batchBytes + runningBytes > maxBytes) {
-      final String errMsg = String.format("Adding this batch causes the total size to exceed max allowed size. " +
-          "Current runningBytes %d, Incoming batchBytes %d. maxBytes %d", runningBytes, batchBytes, maxBytes);
-      logger.error(errMsg);
-      throw new DrillRuntimeException(errMsg);
-    }
     if(runningBatches >= Character.MAX_VALUE) {
-      final String errMsg = String.format("Tried to add more than %d number of batches.", Character.MAX_VALUE);
+      final String errMsg = String.format("Tried to add more than %d number of batches.", (int) Character.MAX_VALUE);
       logger.error(errMsg);
       throw new DrillRuntimeException(errMsg);
     }
-    if(!svAllocator.preAllocate(rbd.getRecordCount()*4)) {
+    if (!reservation.add(rbd.getRecordCount() * 4)) {
       final String errMsg = String.format("Failed to pre-allocate memory for SV. " + "Existing recordCount*4 = %d, " +
           "incoming batch recordCount*4 = %d", recordCount * 4, rbd.getRecordCount() * 4);
       logger.error(errMsg);
@@ -134,7 +125,7 @@ public class SortRecordBatchBuilder {
       }
       return;
     }
-    runningBytes += batchBytes;
+    runningBatches++;
     batches.put(rbd.getContainer().getSchema(), rbd);
     recordCount += rbd.getRecordCount();
   }
@@ -161,7 +152,7 @@ public class SortRecordBatchBuilder {
       assert false : "Invalid to have an empty set of batches with no schemas.";
     }
 
-    final DrillBuf svBuffer = svAllocator.getAllocation();
+    final DrillBuf svBuffer = reservation.allocateBuffer();
     if (svBuffer == null) {
       throw new OutOfMemoryError("Failed to allocate direct memory for SV4 vector in SortRecordBatchBuilder.");
     }
@@ -226,6 +217,11 @@ public class SortRecordBatchBuilder {
     if (sv4 != null) {
       sv4.clear();
     }
+  }
+
+  @Override
+  public void close() {
+    reservation.close();
   }
 
   public List<VectorContainer> getHeldRecordBatches() {

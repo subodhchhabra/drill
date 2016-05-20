@@ -18,8 +18,8 @@
 package org.apache.drill.exec.rpc.data;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.util.concurrent.GenericFutureListener;
 
 import org.apache.drill.exec.memory.BufferAllocator;
@@ -40,28 +40,33 @@ public class DataClient extends BasicClient<RpcType, DataClientConnection, BitCl
 
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DataClient.class);
 
-  private final DrillbitEndpoint remoteEndpoint;
   private volatile DataClientConnection connection;
   private final BufferAllocator allocator;
   private final DataConnectionManager.CloseHandlerCreator closeHandlerFactory;
 
 
   public DataClient(DrillbitEndpoint remoteEndpoint, BootStrapContext context, DataConnectionManager.CloseHandlerCreator closeHandlerFactory) {
-    super(DataRpcConfig.MAPPING, context.getAllocator().getUnderlyingAllocator(), context.getBitClientLoopGroup(), RpcType.HANDSHAKE, BitServerHandshake.class, BitServerHandshake.PARSER);
-    this.remoteEndpoint = remoteEndpoint;
+    super(
+        DataRpcConfig.getMapping(context.getConfig(), context.getExecutor()),
+        context.getAllocator().getAsByteBufAllocator(),
+        context.getBitClientLoopGroup(),
+        RpcType.HANDSHAKE,
+        BitServerHandshake.class,
+        BitServerHandshake.PARSER);
     this.closeHandlerFactory = closeHandlerFactory;
     this.allocator = context.getAllocator();
   }
 
   @Override
-  public DataClientConnection initRemoteConnection(Channel channel) {
+  public DataClientConnection initRemoteConnection(SocketChannel channel) {
+    super.initRemoteConnection(channel);
     this.connection = new DataClientConnection(channel, this);
     return connection;
   }
 
   @Override
-  protected GenericFutureListener<ChannelFuture> getCloseHandler(DataClientConnection clientConnection) {
-    return closeHandlerFactory.getHandler(clientConnection, super.getCloseHandler(clientConnection));
+  protected GenericFutureListener<ChannelFuture> getCloseHandler(SocketChannel ch, DataClientConnection clientConnection) {
+    return closeHandlerFactory.getHandler(clientConnection, super.getCloseHandler(ch, clientConnection));
   }
 
   @Override

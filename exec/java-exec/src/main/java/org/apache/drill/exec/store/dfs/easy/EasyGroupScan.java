@@ -18,6 +18,7 @@
 package org.apache.drill.exec.store.dfs.easy;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.List;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
@@ -30,15 +31,17 @@ import org.apache.drill.exec.physical.base.FileGroupScan;
 import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.physical.base.ScanStats;
-import org.apache.drill.exec.physical.base.ScanStats.GroupScanProperty;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.store.StoragePluginRegistry;
+import org.apache.drill.exec.store.dfs.DrillFileSystem;
 import org.apache.drill.exec.store.dfs.FileSelection;
 import org.apache.drill.exec.store.schedule.AffinityCreator;
 import org.apache.drill.exec.store.schedule.AssignmentCreator;
 import org.apache.drill.exec.store.schedule.BlockMapBuilder;
 import org.apache.drill.exec.store.schedule.CompleteFileWork;
 import org.apache.drill.exec.store.schedule.CompleteFileWork.FileWorkImpl;
+import org.apache.drill.exec.util.ImpersonationUtil;
 
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
@@ -46,12 +49,13 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.Iterators;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 
 @JsonTypeName("fs-scan")
 public class EasyGroupScan extends AbstractFileGroupScan{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(EasyGroupScan.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(EasyGroupScan.class);
 
   private FileSelection selection;
   private final EasyFormatPlugin<?> formatPlugin;
@@ -65,6 +69,7 @@ public class EasyGroupScan extends AbstractFileGroupScan{
 
   @JsonCreator
   public EasyGroupScan(
+      @JsonProperty("userName") String userName,
       @JsonProperty("files") List<String> files, //
       @JsonProperty("storage") StoragePluginConfig storageConfig, //
       @JsonProperty("format") FormatPluginConfig formatConfig, //
@@ -72,32 +77,45 @@ public class EasyGroupScan extends AbstractFileGroupScan{
       @JsonProperty("columns") List<SchemaPath> columns,
       @JsonProperty("selectionRoot") String selectionRoot
       ) throws IOException, ExecutionSetupException {
-        this(new FileSelection(files, true),
+        this(ImpersonationUtil.resolveUserName(userName),
+            FileSelection.create(null, files, selectionRoot),
             (EasyFormatPlugin<?>)engineRegistry.getFormatPlugin(storageConfig, formatConfig),
             columns,
             selectionRoot);
   }
 
-  public EasyGroupScan(FileSelection selection, EasyFormatPlugin<?> formatPlugin, String selectionRoot)
+  public EasyGroupScan(String userName, FileSelection selection, EasyFormatPlugin<?> formatPlugin, String selectionRoot)
       throws IOException {
-    this(selection, formatPlugin, ALL_COLUMNS, selectionRoot);
+    this(userName, selection, formatPlugin, ALL_COLUMNS, selectionRoot);
   }
 
   public EasyGroupScan(
+      String userName,
       FileSelection selection, //
       EasyFormatPlugin<?> formatPlugin, //
       List<SchemaPath> columns,
       String selectionRoot
       ) throws IOException{
+    super(userName);
     this.selection = Preconditions.checkNotNull(selection);
     this.formatPlugin = Preconditions.checkNotNull(formatPlugin, "Unable to load format plugin for provided format config.");
-    this.columns = columns == null || columns.size() == 0? ALL_COLUMNS : columns;
+    this.columns = columns == null ? ALL_COLUMNS : columns;
     this.selectionRoot = selectionRoot;
     initFromSelection(selection, formatPlugin);
   }
 
-  private EasyGroupScan(EasyGroupScan that) {
-    Preconditions.checkNotNull(that, "Unable to clone: source is null.");
+  @JsonIgnore
+  public Iterable<CompleteFileWork> getWorkIterable() {
+    return new Iterable<CompleteFileWork>() {
+      @Override
+      public Iterator<CompleteFileWork> iterator() {
+        return Iterators.unmodifiableIterator(chunks.iterator());
+      }
+    };
+  }
+
+  private EasyGroupScan(final EasyGroupScan that) {
+    super(that.getUserName());
     selection = that.selection;
     formatPlugin = that.formatPlugin;
     columns = that.columns;
@@ -109,9 +127,10 @@ public class EasyGroupScan extends AbstractFileGroupScan{
   }
 
   private void initFromSelection(FileSelection selection, EasyFormatPlugin<?> formatPlugin) throws IOException {
+    final DrillFileSystem dfs = ImpersonationUtil.createFileSystem(getUserName(), formatPlugin.getFsConf());
     this.selection = selection;
-    BlockMapBuilder b = new BlockMapBuilder(formatPlugin.getFileSystem(), formatPlugin.getContext().getBits());
-    this.chunks = b.generateFileWork(selection.getFileStatusList(formatPlugin.getFileSystem()), formatPlugin.isBlockSplittable());
+    BlockMapBuilder b = new BlockMapBuilder(dfs, formatPlugin.getContext().getBits());
+    this.chunks = b.generateFileWork(selection.getStatuses(dfs), formatPlugin.isBlockSplittable());
     this.maxWidth = chunks.size();
     this.endpointAffinities = AffinityCreator.getAffinityMap(chunks);
   }
@@ -127,19 +146,19 @@ public class EasyGroupScan extends AbstractFileGroupScan{
 
 
   @Override
-  public ScanStats getScanStats() {
-    long data =0;
-    for (CompleteFileWork work : chunks) {
-      data += work.getTotalBytes();
-    }
+  public ScanStats getScanStats(final PlannerSettings settings) {
+    return formatPlugin.getScanStats(settings, this);
+  }
 
-    long estRowCount = data/1024;
-    return new ScanStats(GroupScanProperty.NO_EXACT_ROW_COUNT, estRowCount, 1, data);
+  @Override
+  public boolean hasFiles() {
+    return true;
   }
 
   @JsonProperty("files")
+  @Override
   public List<String> getFiles() {
-    return selection.getAsFiles();
+    return selection.getFiles();
   }
 
   @JsonProperty("columns")
@@ -201,7 +220,9 @@ public class EasyGroupScan extends AbstractFileGroupScan{
     Preconditions.checkArgument(!filesForMinor.isEmpty(),
         String.format("MinorFragmentId %d has no read entries assigned", minorFragmentId));
 
-    return new EasySubScan(convert(filesForMinor), formatPlugin, columns, selectionRoot);
+    EasySubScan subScan = new EasySubScan(getUserName(), convert(filesForMinor), formatPlugin, columns, selectionRoot);
+    subScan.setOperatorId(this.getOperatorId());
+    return subScan;
   }
 
   private List<FileWorkImpl> convert(List<CompleteFileWork> list) {

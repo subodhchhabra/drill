@@ -20,31 +20,21 @@ package org.apache.drill.exec.physical.impl.materialize;
 import io.netty.buffer.ByteBuf;
 
 import java.util.Arrays;
-import java.util.List;
 
-import org.apache.drill.exec.proto.UserBitShared.QueryId;
-import org.apache.drill.exec.proto.UserBitShared.QueryResult;
-import org.apache.drill.exec.proto.UserBitShared.RecordBatchDef;
-import org.apache.drill.exec.proto.UserBitShared.SerializedField;
-import org.apache.drill.exec.record.BatchSchema;
-import org.apache.drill.exec.record.MaterializedField;
-
-import com.google.common.collect.Lists;
+import org.apache.drill.exec.proto.UserBitShared.QueryData;
 
 public class QueryWritableBatch {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(QueryWritableBatch.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(QueryWritableBatch.class);
 
-  private final QueryResult header;
+  private final QueryData header;
   private final ByteBuf[] buffers;
 
-
-  public QueryWritableBatch(QueryResult header, ByteBuf... buffers) {
-    super();
+  public QueryWritableBatch(QueryData header, ByteBuf... buffers) {
     this.header = header;
     this.buffers = buffers;
   }
 
-  public ByteBuf[] getBuffers(){
+  public ByteBuf[] getBuffers() {
     return buffers;
   }
 
@@ -56,7 +46,7 @@ public class QueryWritableBatch {
     return n;
   }
 
-  public QueryResult getHeader() {
+  public QueryData getHeader() {
     return header;
   }
 

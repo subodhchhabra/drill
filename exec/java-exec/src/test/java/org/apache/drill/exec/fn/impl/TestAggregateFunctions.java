@@ -17,11 +17,21 @@
  */
 package org.apache.drill.exec.fn.impl;
 
+import com.google.common.collect.Lists;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.drill.BaseTestQuery;
+import org.apache.drill.PlanTestBase;
+import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.types.TypeProtos;
+import org.apache.drill.common.util.TestTools;
+import org.junit.Ignore;
 import org.junit.Test;
 
+import java.util.List;
+
 public class TestAggregateFunctions extends BaseTestQuery {
+
+  private static final String TEST_RES_PATH =   TestTools.getWorkingPath() + "/src/test/resources";
 
   /*
    * Test checks the count of a nullable column within a map
@@ -58,6 +68,7 @@ public class TestAggregateFunctions extends BaseTestQuery {
         .go();
   }
 
+  @Ignore
   @Test // DRILL-2092: count distinct, non distinct aggregate with group-by
   public void testDrill2092() throws Exception {
     String query = "select a1, b1, count(distinct c1) as dist1, \n"
@@ -166,6 +177,352 @@ public class TestAggregateFunctions extends BaseTestQuery {
         .baselineColumns("col")
         .baselineValues(3.0d)
         .go();
+  }
+
+  @Test
+  public void testCountWithAvg() throws Exception {
+    testBuilder()
+        .sqlQuery("select count(a) col1, avg(b) col2 from cp.`jsoninput/nullable3.json`")
+        .unOrdered()
+        .baselineColumns("col1", "col2")
+        .baselineValues(2l, 3.0d)
+        .go();
+
+    testBuilder()
+        .sqlQuery("select count(a) col1, avg(a) col2 from cp.`jsoninput/nullable3.json`")
+        .unOrdered()
+        .baselineColumns("col1", "col2")
+        .baselineValues(2l, 1.0d)
+        .go();
+  }
+
+  @Test
+  public void testAvgOnKnownType() throws Exception {
+    testBuilder()
+        .sqlQuery("select avg(cast(employee_id as bigint)) as col from cp.`employee.json`")
+        .unOrdered()
+        .baselineColumns("col")
+        .baselineValues(578.9982683982684d)
+        .go();
+  }
+
+  @Test
+  public void testStddevOnKnownType() throws Exception {
+    testBuilder()
+        .sqlQuery("select stddev_samp(cast(employee_id as int)) as col from cp.`employee.json`")
+        .unOrdered()
+        .baselineColumns("col")
+        .baselineValues(333.56708470261117d)
+        .go();
+  }
+
+  @Test
+  // test aggregates when input is empty and data type is optional
+  public void countEmptyNullableInput() throws Exception {
+    String query = "select " +
+        "count(employee_id) col1, avg(employee_id) col2, sum(employee_id) col3 " +
+        "from cp.`employee.json` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3")
+        .baselineValues(0l, null, null)
+        .go();
+  }
+
+  @Test
+  @Ignore("DRILL-4473")
+  public void sumEmptyNonexistentNullableInput() throws Exception {
+    final String query = "select "
+        +
+        "sum(int_col) col1, sum(bigint_col) col2, sum(float4_col) col3, sum(float8_col) col4, sum(interval_year_col) col5 "
+        +
+        "from cp.`employee.json` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3", "col4", "col5")
+        .baselineValues(null, null, null, null, null)
+        .go();
+  }
+
+  @Test
+  @Ignore("DRILL-4473")
+  public void avgEmptyNonexistentNullableInput() throws Exception {
+    // test avg function
+    final String query = "select "
+        +
+        "avg(int_col) col1, avg(bigint_col) col2, avg(float4_col) col3, avg(float8_col) col4, avg(interval_year_col) col5 "
+        +
+        "from cp.`employee.json` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3", "col4", "col5")
+        .baselineValues(null, null, null, null, null)
+        .go();
+  }
+
+  @Test
+  public void stddevEmptyNonexistentNullableInput() throws Exception {
+    // test stddev function
+    final String query = "select " +
+        "stddev_pop(int_col) col1, stddev_pop(bigint_col) col2, stddev_pop(float4_col) col3, " +
+        "stddev_pop(float8_col) col4, stddev_pop(interval_year_col) col5 " +
+        "from cp.`employee.json` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3", "col4", "col5")
+        .baselineValues(null, null, null, null, null)
+        .go();
+
+  }
+  @Test
+  public void minEmptyNonnullableInput() throws Exception {
+    // test min function on required type
+    String query = "select " +
+        "min(bool_col) col1, min(int_col) col2, min(bigint_col) col3, min(float4_col) col4, min(float8_col) col5, " +
+        "min(date_col) col6, min(time_col) col7, min(timestamp_col) col8, min(interval_year_col) col9, " +
+        "min(varhcar_col) col10 " +
+        "from cp.`parquet/alltypes_required.parquet` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3", "col4", "col5", "col6", "col7", "col8", "col9", "col10")
+        .baselineValues(null, null, null, null, null, null, null, null, null, null)
+        .go();
+  }
+
+  @Test
+  public void maxEmptyNonnullableInput() throws Exception {
+
+    // test max function
+    final String query = "select " +
+        "max(int_col) col1, max(bigint_col) col2, max(float4_col) col3, max(float8_col) col4, " +
+        "max(date_col) col5, max(time_col) col6, max(timestamp_col) col7, max(interval_year_col) col8, " +
+        "max(varhcar_col) col9 " +
+        "from cp.`parquet/alltypes_required.parquet` where 1 = 0";
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col1", "col2", "col3", "col4", "col5", "col6", "col7", "col8", "col9")
+        .baselineValues(null, null, null, null, null, null, null, null, null)
+        .go();
+  }
+
+
+  /*
+   * Streaming agg on top of a filter produces wrong results if the first two batches are filtered out.
+   * In the below test we have three files in the input directory and since the ordering of reading
+   * of these files may not be deterministic, we have three tests to make sure we test the case where
+   * streaming agg gets two empty batches.
+   */
+  @Test
+  public void drill3069() throws Exception {
+    final String query = "select max(foo) col1 from dfs_test.`%s/agg/bugs/drill3069` where foo = %d";
+    testBuilder()
+        .sqlQuery(String.format(query, TEST_RES_PATH, 2))
+        .unOrdered()
+        .baselineColumns("col1")
+        .baselineValues(2l)
+        .go();
+
+    testBuilder()
+        .sqlQuery(String.format(query, TEST_RES_PATH, 4))
+        .unOrdered()
+        .baselineColumns("col1")
+        .baselineValues(4l)
+        .go();
+
+    testBuilder()
+        .sqlQuery(String.format(query, TEST_RES_PATH, 6))
+        .unOrdered()
+        .baselineColumns("col1")
+        .baselineValues(6l)
+        .go();
+  }
+
+  @Test //DRILL-2748
+  public void testPushFilterPastAgg() throws Exception {
+    final String query =
+        " select cnt " +
+        " from (select n_regionkey, count(*) cnt from cp.`tpch/nation.parquet` group by n_regionkey) " +
+        " where n_regionkey = 2 ";
+
+    // Validate the plan
+    final String[] expectedPlan = {"(?s)(StreamAgg|HashAgg).*Filter"};
+    final String[] excludedPatterns = {"(?s)Filter.*(StreamAgg|HashAgg)"};
+    PlanTestBase.testPlanMatchingPatterns(query, expectedPlan, excludedPatterns);
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(5l)
+        .build().run();
+
+    // having clause
+    final String query2 =
+        " select count(*) cnt from cp.`tpch/nation.parquet` group by n_regionkey " +
+        " having n_regionkey = 2 ";
+    PlanTestBase.testPlanMatchingPatterns(query2, expectedPlan, excludedPatterns);
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(5l)
+        .build().run();
+  }
+
+  @Test
+  public void testPushFilterInExprPastAgg() throws Exception {
+    final String query =
+        " select cnt " +
+            " from (select n_regionkey, count(*) cnt from cp.`tpch/nation.parquet` group by n_regionkey) " +
+            " where n_regionkey + 100 - 100 = 2 ";
+
+    // Validate the plan
+    final String[] expectedPlan = {"(?s)(StreamAgg|HashAgg).*Filter"};
+    final String[] excludedPatterns = {"(?s)Filter.*(StreamAgg|HashAgg)"};
+    PlanTestBase.testPlanMatchingPatterns(query, expectedPlan, excludedPatterns);
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(5l)
+        .build().run();
+  }
+
+  @Test
+  public void testNegPushFilterInExprPastAgg() throws Exception {
+    // negative case: should not push filter, since it involves the aggregate result
+    final String query =
+        " select cnt " +
+            " from (select n_regionkey, count(*) cnt from cp.`tpch/nation.parquet` group by n_regionkey) " +
+            " where cnt + 100 - 100 = 5 ";
+
+    // Validate the plan
+    final String[] expectedPlan = {"(?s)Filter(?!StreamAgg|!HashAgg)"};
+    final String[] excludedPatterns = {"(?s)(StreamAgg|HashAgg).*Filter"};
+    PlanTestBase.testPlanMatchingPatterns(query, expectedPlan, excludedPatterns);
+
+    // negative case: should not push filter, since it is expression of group key + agg result.
+    final String query2 =
+        " select cnt " +
+            " from (select n_regionkey, count(*) cnt from cp.`tpch/nation.parquet` group by n_regionkey) " +
+            " where cnt + n_regionkey = 5 ";
+    PlanTestBase.testPlanMatchingPatterns(query2, expectedPlan, excludedPatterns);
+
+  }
+
+  @Test // DRILL-3781
+  // GROUP BY System functions in schema table.
+  public void testGroupBySystemFuncSchemaTable() throws Exception {
+    final String query = "select count(*) as cnt from sys.version group by CURRENT_DATE";
+    final String[] expectedPlan = {"(?s)(StreamAgg|HashAgg)"};
+    final String[] excludedPatterns = {};
+
+    PlanTestBase.testPlanMatchingPatterns(query, expectedPlan, excludedPatterns);
+  }
+
+  @Test //DRILL-3781
+  // GROUP BY System functions in csv, parquet, json table.
+  public void testGroupBySystemFuncFileSystemTable() throws Exception {
+    final String query = String.format("select count(*) as cnt from dfs_test.`%s/nation/nation.tbl` group by CURRENT_DATE", TEST_RES_PATH);
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(25l)
+        .build().run();
+
+    final String query2 = "select count(*) as cnt from cp.`tpch/nation.parquet` group by CURRENT_DATE";
+    testBuilder()
+        .sqlQuery(query2)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(25l)
+        .build().run();
+
+    final String query3 = "select count(*) as cnt from cp.`employee.json` group by CURRENT_DATE";
+    testBuilder()
+        .sqlQuery(query3)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues(1155l)
+        .build().run();
+  }
+
+  @Test
+  public void test4443() throws Exception {
+    test("SELECT MIN(columns[1]) FROM dfs_test.`%s/agg/4443.csv` GROUP BY columns[0]", TEST_RES_PATH);
+  }
+
+  @Test
+  public void testCountStarRequired() throws Exception {
+    final String query = "select count(*) as col from cp.`tpch/region.parquet`";
+    List<Pair<SchemaPath, TypeProtos.MajorType>> expectedSchema = Lists.newArrayList();
+    TypeProtos.MajorType majorType = TypeProtos.MajorType.newBuilder()
+        .setMinorType(TypeProtos.MinorType.BIGINT)
+        .setMode(TypeProtos.DataMode.REQUIRED)
+        .build();
+    expectedSchema.add(Pair.of(SchemaPath.getSimplePath("col"), majorType));
+
+    testBuilder()
+        .sqlQuery(query)
+        .schemaBaseLine(expectedSchema)
+        .build()
+        .run();
+
+    testBuilder()
+        .sqlQuery(query)
+        .unOrdered()
+        .baselineColumns("col")
+        .baselineValues(5l)
+        .build()
+        .run();
+  }
+
+
+  @Test // DRILL-4531
+  public void testPushFilterDown() throws Exception {
+    final String sql =
+        "SELECT  cust.custAddress, \n"
+            + "       lineitem.provider \n"
+            + "FROM ( \n"
+            + "      SELECT cast(c_custkey AS bigint) AS custkey, \n"
+            + "             c_address                 AS custAddress \n"
+            + "      FROM   cp.`tpch/customer.parquet` ) cust \n"
+            + "LEFT JOIN \n"
+            + "  ( \n"
+            + "    SELECT DISTINCT l_linenumber, \n"
+            + "           CASE \n"
+            + "             WHEN l_partkey IN (1, 2) THEN 'Store1'\n"
+            + "             WHEN l_partkey IN (5, 6) THEN 'Store2'\n"
+            + "           END AS provider \n"
+            + "    FROM  cp.`tpch/lineitem.parquet` \n"
+            + "    WHERE ( l_orderkey >=20160101 AND l_partkey <=20160301) \n"
+            + "      AND   l_partkey IN (1,2, 5, 6) ) lineitem\n"
+            + "ON        cust.custkey = lineitem.l_linenumber \n"
+            + "WHERE     provider IS NOT NULL \n"
+            + "GROUP BY  cust.custAddress, \n"
+            + "          lineitem.provider \n"
+            + "ORDER BY  cust.custAddress, \n"
+            + "          lineitem.provider";
+
+    // Validate the plan
+    final String[] expectedPlan = {"(?s)(Join).*inner"}; // With filter pushdown, left join will be converted into inner join
+    final String[] excludedPatterns = {"(?s)(Join).*(left)"};
+    PlanTestBase.testPlanMatchingPatterns(sql, expectedPlan, excludedPatterns);
   }
 
 }

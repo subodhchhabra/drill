@@ -18,86 +18,67 @@
 package org.apache.drill.exec.store.hive;
 
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.sql.Date;
-import java.sql.Timestamp;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 
+import com.google.common.util.concurrent.ListenableFuture;
+import io.netty.buffer.DrillBuf;
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.expression.SchemaPath;
-import org.apache.drill.common.types.TypeProtos;
-import org.apache.drill.common.types.TypeProtos.DataMode;
-import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.common.types.TypeProtos.MajorType;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.TypeHelper;
-import org.apache.drill.exec.expr.holders.Decimal18Holder;
-import org.apache.drill.exec.expr.holders.Decimal28SparseHolder;
-import org.apache.drill.exec.expr.holders.Decimal38SparseHolder;
-import org.apache.drill.exec.expr.holders.Decimal9Holder;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.physical.impl.OutputMutator;
 import org.apache.drill.exec.record.MaterializedField;
-import org.apache.drill.exec.rpc.ProtobufLengthDecoder;
+import org.apache.drill.exec.server.options.OptionManager;
 import org.apache.drill.exec.store.AbstractRecordReader;
-import org.apache.drill.exec.util.DecimalUtility;
 import org.apache.drill.exec.vector.AllocationHelper;
-import org.apache.drill.exec.vector.BigIntVector;
-import org.apache.drill.exec.vector.BitVector;
-import org.apache.drill.exec.vector.DateVector;
-import org.apache.drill.exec.vector.Decimal18Vector;
-import org.apache.drill.exec.vector.Decimal28SparseVector;
-import org.apache.drill.exec.vector.Decimal38SparseVector;
-import org.apache.drill.exec.vector.Decimal9Vector;
-import org.apache.drill.exec.vector.Float4Vector;
-import org.apache.drill.exec.vector.Float8Vector;
-import org.apache.drill.exec.vector.IntVector;
-import org.apache.drill.exec.vector.SmallIntVector;
-import org.apache.drill.exec.vector.TimeStampVector;
-import org.apache.drill.exec.vector.TinyIntVector;
 import org.apache.drill.exec.vector.ValueVector;
-import org.apache.drill.exec.vector.VarBinaryVector;
-import org.apache.drill.exec.vector.VarCharVector;
-import org.apache.hadoop.hive.common.type.HiveDecimal;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
 import org.apache.hadoop.hive.metastore.MetaStoreUtils;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
+import org.apache.hadoop.hive.metastore.api.hive_metastoreConstants;
+import org.apache.hadoop.hive.serde.serdeConstants;
 import org.apache.hadoop.hive.serde2.ColumnProjectionUtils;
 import org.apache.hadoop.hive.serde2.SerDe;
 import org.apache.hadoop.hive.serde2.SerDeException;
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspector.Category;
-import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector.PrimitiveCategory;
+import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorConverters;
+import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorConverters.Converter;
 import org.apache.hadoop.hive.serde2.objectinspector.StructObjectInspector;
-import org.apache.hadoop.hive.serde2.typeinfo.DecimalTypeInfo;
-import org.apache.hadoop.hive.serde2.typeinfo.HiveDecimalUtils;
-import org.apache.hadoop.hive.serde2.typeinfo.PrimitiveTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.StructTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoUtils;
 import org.apache.hadoop.io.Writable;
-import org.apache.hadoop.mapred.InputFormat;
 import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.RecordReader;
 import org.apache.hadoop.mapred.Reporter;
-import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
 
 import com.google.common.collect.Lists;
+import org.apache.hadoop.security.UserGroupInformation;
 
 public class HiveRecordReader extends AbstractRecordReader {
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(HiveRecordReader.class);
 
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(HiveRecordReader.class);
+  private final DrillBuf managedBuffer;
 
   protected Table table;
   protected Partition partition;
   protected InputSplit inputSplit;
-  protected FragmentContext context;
   protected List<String> selectedColumnNames;
   protected List<TypeInfo> selectedColumnTypes = Lists.newArrayList();
   protected List<ObjectInspector> selectedColumnObjInspectors = Lists.newArrayList();
@@ -105,105 +86,110 @@ public class HiveRecordReader extends AbstractRecordReader {
   protected List<String> selectedPartitionNames = Lists.newArrayList();
   protected List<TypeInfo> selectedPartitionTypes = Lists.newArrayList();
   protected List<Object> selectedPartitionValues = Lists.newArrayList();
-  protected List<String> tableColumns; // all columns in table (not including partition columns)
-  protected SerDe serde;
-  protected StructObjectInspector sInspector;
-  protected Object key, value;
-  protected org.apache.hadoop.mapred.RecordReader reader;
+
+  // SerDe of the reading partition (or table if the table is non-partitioned)
+  protected SerDe partitionSerDe;
+
+  // ObjectInspector to read data from partitionSerDe (for a non-partitioned table this is same as the table
+  // ObjectInspector).
+  protected StructObjectInspector partitionOI;
+
+  // Final ObjectInspector. We may not use the partitionOI directly if there are schema changes between the table and
+  // partition. If there are no schema changes then this is same as the partitionOI.
+  protected StructObjectInspector finalOI;
+
+  // Converter which converts data from partition schema to table schema.
+  private Converter partTblObjectInspectorConverter;
+
+  protected Object key;
+  protected RecordReader<Object, Object> reader;
   protected List<ValueVector> vectors = Lists.newArrayList();
   protected List<ValueVector> pVectors = Lists.newArrayList();
-  protected Object redoRecord;
   protected boolean empty;
-  private Map<String, String> hiveConfigOverride;
+  private HiveConf hiveConf;
   private FragmentContext fragmentContext;
-  private OperatorContext operatorContext;
-
+  private String defaultPartitionValue;
+  private final UserGroupInformation proxyUgi;
+  private SkipRecordsInspector skipRecordsInspector;
 
   protected static final int TARGET_RECORD_COUNT = 4000;
-  protected static final int FIELD_SIZE = 50;
 
   public HiveRecordReader(Table table, Partition partition, InputSplit inputSplit, List<SchemaPath> projectedColumns,
-      FragmentContext context, Map<String, String> hiveConfigOverride) throws ExecutionSetupException {
+                          FragmentContext context, final HiveConf hiveConf,
+                          UserGroupInformation proxyUgi) throws ExecutionSetupException {
     this.table = table;
     this.partition = partition;
     this.inputSplit = inputSplit;
-    this.context = context;
     this.empty = (inputSplit == null && partition == null);
-    this.hiveConfigOverride = hiveConfigOverride;
-    this.fragmentContext=context;
+    this.hiveConf = hiveConf;
+    this.fragmentContext = context;
+    this.proxyUgi = proxyUgi;
+    this.managedBuffer = fragmentContext.getManagedBuffer().reallocIfNeeded(256);
     setColumns(projectedColumns);
-    init();
   }
 
   private void init() throws ExecutionSetupException {
-    Properties properties;
-    JobConf job = new JobConf();
-    if (partition != null) {
-      properties = MetaStoreUtils.getPartitionMetadata(partition, table);
+    final JobConf job = new JobConf(hiveConf);
 
-      // SerDe expects properties from Table, but above call doesn't add Table properties.
-      // Include Table properties in final list in order to not to break SerDes that depend on
-      // Table properties. For example AvroSerDe gets the schema from properties (passed as second argument)
-      for (Map.Entry<String, String> entry : table.getParameters().entrySet()) {
-        if (entry.getKey() != null && entry.getKey() != null) {
-          properties.put(entry.getKey(), entry.getValue());
-        }
-      }
-    } else {
-      properties = MetaStoreUtils.getTableMetadata(table);
-    }
-    for (Object obj : properties.keySet()) {
-      job.set((String) obj, (String) properties.get(obj));
-    }
-    for(Map.Entry<String, String> entry : hiveConfigOverride.entrySet()) {
-      job.set(entry.getKey(), entry.getValue());
-    }
-    InputFormat format;
-    String sLib = (partition == null) ? table.getSd().getSerdeInfo().getSerializationLib() : partition.getSd().getSerdeInfo().getSerializationLib();
-    String inputFormatName = (partition == null) ? table.getSd().getInputFormat() : partition.getSd().getInputFormat();
+    // Get the configured default val
+    defaultPartitionValue = hiveConf.get(ConfVars.DEFAULTPARTITIONNAME.varname);
+
+    Properties tableProperties;
     try {
-      format = (InputFormat) Class.forName(inputFormatName).getConstructor().newInstance();
-      Class c = Class.forName(sLib);
-      serde = (SerDe) c.getConstructor().newInstance();
-      serde.initialize(job, properties);
-    } catch (ReflectiveOperationException | SerDeException e) {
-      throw new ExecutionSetupException("Unable to instantiate InputFormat", e);
-    }
-    job.setInputFormat(format.getClass());
+      tableProperties = MetaStoreUtils.getTableMetadata(table);
+      final Properties partitionProperties =
+          (partition == null) ?  tableProperties :
+              HiveUtilities.getPartitionMetadata(partition, table);
+      HiveUtilities.addConfToJob(job, partitionProperties);
 
-    List<FieldSchema> partitionKeys = table.getPartitionKeys();
-    List<String> partitionNames = Lists.newArrayList();
-    for (FieldSchema field : partitionKeys) {
-      partitionNames.add(field.getName());
-    }
+      final SerDe tableSerDe = createSerDe(job, table.getSd().getSerdeInfo().getSerializationLib(), tableProperties);
+      final StructObjectInspector tableOI = getStructOI(tableSerDe);
 
-    try {
-      ObjectInspector oi = serde.getObjectInspector();
-      if (oi.getCategory() != ObjectInspector.Category.STRUCT) {
-        throw new UnsupportedOperationException(String.format("%s category not supported", oi.getCategory()));
+      if (partition != null) {
+        partitionSerDe = createSerDe(job, partition.getSd().getSerdeInfo().getSerializationLib(), partitionProperties);
+        partitionOI = getStructOI(partitionSerDe);
+
+        finalOI = (StructObjectInspector)ObjectInspectorConverters.getConvertedOI(partitionOI, tableOI);
+        partTblObjectInspectorConverter = ObjectInspectorConverters.getConverter(partitionOI, finalOI);
+        job.setInputFormat(HiveUtilities.getInputFormatClass(job, partition.getSd(), table));
+      } else {
+        // For non-partitioned tables, there is no need to create converter as there are no schema changes expected.
+        partitionSerDe = tableSerDe;
+        partitionOI = tableOI;
+        partTblObjectInspectorConverter = null;
+        finalOI = tableOI;
+        job.setInputFormat(HiveUtilities.getInputFormatClass(job, table.getSd(), table));
       }
-      sInspector = (StructObjectInspector) oi;
-      StructTypeInfo sTypeInfo = (StructTypeInfo) TypeInfoUtils.getTypeInfoFromObjectInspector(sInspector);
-      List<Integer> columnIds = Lists.newArrayList();
+
+      // Get list of partition column names
+      final List<String> partitionNames = Lists.newArrayList();
+      for (FieldSchema field : table.getPartitionKeys()) {
+        partitionNames.add(field.getName());
+      }
+
+      // We should always get the columns names from ObjectInspector. For some of the tables (ex. avro) metastore
+      // may not contain the schema, instead it is derived from other sources such as table properties or external file.
+      // SerDe object knows how to get the schema with all the config and table properties passed in initialization.
+      // ObjectInspector created from the SerDe object has the schema.
+      final StructTypeInfo sTypeInfo = (StructTypeInfo) TypeInfoUtils.getTypeInfoFromObjectInspector(finalOI);
+      final List<String> tableColumnNames = sTypeInfo.getAllStructFieldNames();
+
+      // Select list of columns for project pushdown into Hive SerDe readers.
+      final List<Integer> columnIds = Lists.newArrayList();
       if (isStarQuery()) {
-        selectedColumnNames = sTypeInfo.getAllStructFieldNames();
-        tableColumns = selectedColumnNames;
+        selectedColumnNames = tableColumnNames;
         for(int i=0; i<selectedColumnNames.size(); i++) {
           columnIds.add(i);
         }
+        selectedPartitionNames = partitionNames;
       } else {
-        tableColumns = sTypeInfo.getAllStructFieldNames();
         selectedColumnNames = Lists.newArrayList();
         for (SchemaPath field : getColumns()) {
           String columnName = field.getRootSegment().getPath();
-          if (!tableColumns.contains(columnName)) {
-            if (partitionNames.contains(columnName)) {
-              selectedPartitionNames.add(columnName);
-            } else {
-              throw new ExecutionSetupException(String.format("Column %s does not exist", columnName));
-            }
+          if (partitionNames.contains(columnName)) {
+            selectedPartitionNames.add(columnName);
           } else {
-            columnIds.add(tableColumns.indexOf(columnName));
+            columnIds.add(tableColumnNames.indexOf(columnName));
             selectedColumnNames.add(columnName);
           }
         }
@@ -211,16 +197,12 @@ public class HiveRecordReader extends AbstractRecordReader {
       ColumnProjectionUtils.appendReadColumns(job, columnIds, selectedColumnNames);
 
       for (String columnName : selectedColumnNames) {
-        ObjectInspector fieldOI = sInspector.getStructFieldRef(columnName).getFieldObjectInspector();
+        ObjectInspector fieldOI = finalOI.getStructFieldRef(columnName).getFieldObjectInspector();
         TypeInfo typeInfo = TypeInfoUtils.getTypeInfoFromTypeString(fieldOI.getTypeName());
 
         selectedColumnObjInspectors.add(fieldOI);
         selectedColumnTypes.add(typeInfo);
         selectedColumnFieldConverters.add(HiveFieldConverter.create(typeInfo, fragmentContext));
-      }
-
-      if (isStarQuery()) {
-        selectedPartitionNames = partitionNames;
       }
 
       for (int i = 0; i < table.getPartitionKeys().size(); i++) {
@@ -230,7 +212,8 @@ public class HiveRecordReader extends AbstractRecordReader {
           selectedPartitionTypes.add(pType);
 
           if (partition != null) {
-            selectedPartitionValues.add(convertPartitionType(pType, partition.getValues().get(i)));
+            selectedPartitionValues.add(
+                HiveUtilities.convertPartitionType(pType, partition.getValues().get(i), defaultPartitionValue));
           }
         }
       }
@@ -240,37 +223,70 @@ public class HiveRecordReader extends AbstractRecordReader {
 
     if (!empty) {
       try {
-        reader = format.getRecordReader(inputSplit, job, Reporter.NULL);
-      } catch (IOException e) {
+        reader = (org.apache.hadoop.mapred.RecordReader<Object, Object>) job.getInputFormat().getRecordReader(inputSplit, job, Reporter.NULL);
+      } catch (Exception e) {
         throw new ExecutionSetupException("Failed to get o.a.hadoop.mapred.RecordReader from Hive InputFormat", e);
       }
       key = reader.createKey();
-      value = reader.createValue();
+      skipRecordsInspector = new SkipRecordsInspector(tableProperties, reader);
     }
   }
 
-  public OperatorContext getOperatorContext() {
-    return operatorContext;
+  /**
+   * Utility method which creates a SerDe object for given SerDe class name and properties.
+   */
+  private static SerDe createSerDe(final JobConf job, final String sLib, final Properties properties) throws Exception {
+    final Class<? extends SerDe> c = Class.forName(sLib).asSubclass(SerDe.class);
+    final SerDe serde = c.getConstructor().newInstance();
+    serde.initialize(job, properties);
+
+    return serde;
   }
 
-  public void setOperatorContext(OperatorContext operatorContext) {
-    this.operatorContext = operatorContext;
+  private static StructObjectInspector getStructOI(final SerDe serDe) throws Exception {
+    ObjectInspector oi = serDe.getObjectInspector();
+    if (oi.getCategory() != ObjectInspector.Category.STRUCT) {
+      throw new UnsupportedOperationException(String.format("%s category not supported", oi.getCategory()));
+    }
+    return (StructObjectInspector) oi;
   }
 
   @Override
-  public void setup(OutputMutator output) throws ExecutionSetupException {
+  public void setup(OperatorContext context, OutputMutator output)
+      throws ExecutionSetupException {
+    // initializes "reader"
+    final Callable<Void> readerInitializer = new Callable<Void>() {
+      @Override
+      public Void call() throws Exception {
+        init();
+        return null;
+      }
+    };
+
+    final ListenableFuture<Void> result = context.runCallableAs(proxyUgi, readerInitializer);
     try {
+      result.get();
+    } catch (InterruptedException e) {
+      result.cancel(true);
+      // Preserve evidence that the interruption occurred so that code higher up on the call stack can learn of the
+      // interruption and respond to it if it wants to.
+      Thread.currentThread().interrupt();
+    } catch (ExecutionException e) {
+      throw ExecutionSetupException.fromThrowable(e.getMessage(), e);
+    }
+    try {
+      final OptionManager options = fragmentContext.getOptions();
       for (int i = 0; i < selectedColumnNames.size(); i++) {
-        MajorType type = getMajorTypeFromHiveTypeInfo(selectedColumnTypes.get(i), true);
-        MaterializedField field = MaterializedField.create(SchemaPath.getSimplePath(selectedColumnNames.get(i)), type);
-        Class vvClass = TypeHelper.getValueVectorClass(type.getMinorType(), type.getMode());
+        MajorType type = HiveUtilities.getMajorTypeFromHiveTypeInfo(selectedColumnTypes.get(i), options);
+        MaterializedField field = MaterializedField.create(selectedColumnNames.get(i), type);
+        Class<? extends ValueVector> vvClass = TypeHelper.getValueVectorClass(type.getMinorType(), type.getMode());
         vectors.add(output.addField(field, vvClass));
       }
 
       for (int i = 0; i < selectedPartitionNames.size(); i++) {
-        MajorType type = getMajorTypeFromHiveTypeInfo(selectedPartitionTypes.get(i), false);
-        MaterializedField field = MaterializedField.create(SchemaPath.getSimplePath(selectedPartitionNames.get(i)), type);
-        Class vvClass = TypeHelper.getValueVectorClass(field.getType().getMinorType(), field.getDataMode());
+        MajorType type = HiveUtilities.getMajorTypeFromHiveTypeInfo(selectedPartitionTypes.get(i), options);
+        MaterializedField field = MaterializedField.create(selectedPartitionNames.get(i), type);
+        Class<? extends ValueVector> vvClass = TypeHelper.getValueVectorClass(field.getType().getMinorType(), field.getDataMode());
         pVectors.add(output.addField(field, vvClass));
       }
     } catch(SchemaChangeException e) {
@@ -278,6 +294,16 @@ public class HiveRecordReader extends AbstractRecordReader {
     }
   }
 
+  /**
+   * To take into account Hive "skip.header.lines.count" property first N values from file are skipped.
+   * Since file can be read in batches (depends on TARGET_RECORD_COUNT), additional checks are made
+   * to determine if it's new file or continuance.
+   *
+   * To take into account Hive "skip.footer.lines.count" property values are buffered in queue
+   * until queue size exceeds number of footer lines to skip, then first value in queue is retrieved.
+   * Buffer of value objects is used to re-use value objects in order to reduce number of created value objects.
+   * For each new file queue is cleared to drop footer lines from previous file.
+   */
   @Override
   public int next() {
     for (ValueVector vv : vectors) {
@@ -289,50 +315,43 @@ public class HiveRecordReader extends AbstractRecordReader {
     }
 
     try {
+      skipRecordsInspector.reset();
       int recordCount = 0;
-
-      if (redoRecord != null) {
-        // Try writing the record that didn't fit into the last RecordBatch
-        Object deSerializedValue = serde.deserialize((Writable) redoRecord);
-        boolean status = readHiveRecordAndInsertIntoRecordBatch(deSerializedValue, recordCount);
-        if (!status) {
-          throw new DrillRuntimeException("Current record is too big to fit into allocated ValueVector buffer");
+      Object value;
+      while (recordCount < TARGET_RECORD_COUNT && reader.next(key, value = skipRecordsInspector.getNextValue())) {
+        if (skipRecordsInspector.doSkipHeader(recordCount++)) {
+          continue;
         }
-        redoRecord = null;
-        recordCount++;
+        Object bufferedValue = skipRecordsInspector.bufferAdd(value);
+        if (bufferedValue != null) {
+          Object deSerializedValue = partitionSerDe.deserialize((Writable) bufferedValue);
+          if (partTblObjectInspectorConverter != null) {
+            deSerializedValue = partTblObjectInspectorConverter.convert(deSerializedValue);
+          }
+          readHiveRecordAndInsertIntoRecordBatch(deSerializedValue, skipRecordsInspector.getActualCount());
+          skipRecordsInspector.incrementActualCount();
+        }
+        skipRecordsInspector.incrementTempCount();
       }
 
-      while (recordCount < TARGET_RECORD_COUNT && reader.next(key, value)) {
-        Object deSerializedValue = serde.deserialize((Writable) value);
-        boolean status = readHiveRecordAndInsertIntoRecordBatch(deSerializedValue, recordCount);
-        if (!status) {
-          redoRecord = value;
-          setValueCountAndPopulatePartitionVectors(recordCount);
-          return recordCount;
-        }
-        recordCount++;
-      }
-
-      setValueCountAndPopulatePartitionVectors(recordCount);
-      return recordCount;
+      setValueCountAndPopulatePartitionVectors(skipRecordsInspector.getActualCount());
+      skipRecordsInspector.updateContinuance();
+      return skipRecordsInspector.getActualCount();
     } catch (IOException | SerDeException e) {
       throw new DrillRuntimeException(e);
     }
   }
 
-  private boolean readHiveRecordAndInsertIntoRecordBatch(Object deSerializedValue, int outputRecordIndex) {
-    boolean success;
+  private void readHiveRecordAndInsertIntoRecordBatch(Object deSerializedValue, int outputRecordIndex) {
     for (int i = 0; i < selectedColumnNames.size(); i++) {
-      String columnName = selectedColumnNames.get(i);
-      Object hiveValue = sInspector.getStructFieldData(deSerializedValue, sInspector.getStructFieldRef(columnName));
+      final String columnName = selectedColumnNames.get(i);
+      Object hiveValue = finalOI.getStructFieldData(deSerializedValue, finalOI.getStructFieldRef(columnName));
 
       if (hiveValue != null) {
         selectedColumnFieldConverters.get(i).setSafeValue(selectedColumnObjInspectors.get(i), hiveValue,
             vectors.get(i), outputRecordIndex);
       }
     }
-
-    return true;
   }
 
   private void setValueCountAndPopulatePartitionVectors(int recordCount) {
@@ -346,296 +365,151 @@ public class HiveRecordReader extends AbstractRecordReader {
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     try {
-      reader.close();
+      if (reader != null) {
+        reader.close();
+        reader = null;
+      }
     } catch (Exception e) {
       logger.warn("Failure while closing Hive Record reader.", e);
     }
   }
 
-  public static MinorType getMinorTypeFromHivePrimitiveTypeInfo(PrimitiveTypeInfo primitiveTypeInfo) {
-    switch(primitiveTypeInfo.getPrimitiveCategory()) {
-      case BINARY:
-        return TypeProtos.MinorType.VARBINARY;
-      case BOOLEAN:
-        return MinorType.BIT;
-      case BYTE:
-        return MinorType.TINYINT;
-      case DECIMAL: {
-        DecimalTypeInfo decimalTypeInfo = (DecimalTypeInfo) primitiveTypeInfo;
-        return DecimalUtility.getDecimalDataType(decimalTypeInfo.precision());
-      }
-      case DOUBLE:
-        return MinorType.FLOAT8;
-      case FLOAT:
-        return MinorType.FLOAT4;
-      case INT:
-        return MinorType.INT;
-      case LONG:
-        return MinorType.BIGINT;
-      case SHORT:
-        return MinorType.SMALLINT;
-      case STRING:
-      case VARCHAR:
-        return MinorType.VARCHAR;
-      case TIMESTAMP:
-        return MinorType.TIMESTAMP;
-      case DATE:
-        return MinorType.DATE;
-    }
-
-    throwUnsupportedHiveDataTypeError(primitiveTypeInfo.getPrimitiveCategory().toString());
-    return null;
-  }
-
-  public static MajorType getMajorTypeFromHiveTypeInfo(TypeInfo typeInfo, boolean nullable) {
-    switch (typeInfo.getCategory()) {
-      case PRIMITIVE: {
-        PrimitiveTypeInfo primitiveTypeInfo = (PrimitiveTypeInfo) typeInfo;
-        MinorType minorType = getMinorTypeFromHivePrimitiveTypeInfo(primitiveTypeInfo);
-        MajorType.Builder typeBuilder = MajorType.newBuilder().setMinorType(minorType)
-            .setMode((nullable ? DataMode.OPTIONAL : DataMode.REQUIRED));
-
-        if (primitiveTypeInfo.getPrimitiveCategory() == PrimitiveCategory.DECIMAL) {
-          DecimalTypeInfo decimalTypeInfo = (DecimalTypeInfo) primitiveTypeInfo;
-          typeBuilder.setPrecision(decimalTypeInfo.precision())
-              .setScale(decimalTypeInfo.scale()).build();
-        }
-
-        return typeBuilder.build();
-      }
-
-      case LIST:
-      case MAP:
-      case STRUCT:
-      case UNION:
-      default:
-        throwUnsupportedHiveDataTypeError(typeInfo.getCategory().toString());
-    }
-
-    return null;
-  }
-
   protected void populatePartitionVectors(int recordCount) {
     for (int i = 0; i < pVectors.size(); i++) {
-      int size = 50;
-      ValueVector vector = pVectors.get(i);
-      Object val = selectedPartitionValues.get(i);
-      PrimitiveCategory pCat = ((PrimitiveTypeInfo)selectedPartitionTypes.get(i)).getPrimitiveCategory();
-      if (pCat == PrimitiveCategory.BINARY || pCat == PrimitiveCategory.STRING || pCat == PrimitiveCategory.VARCHAR) {
-        size = ((byte[]) selectedPartitionValues.get(i)).length;
-      }
+      final ValueVector vector = pVectors.get(i);
+      final Object val = selectedPartitionValues.get(i);
 
       AllocationHelper.allocateNew(vector, recordCount);
 
-      switch(pCat) {
-        case BINARY: {
-          VarBinaryVector v = (VarBinaryVector) vector;
-          byte[] value = (byte[]) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case BOOLEAN: {
-          BitVector v = (BitVector) vector;
-          Boolean value = (Boolean) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().set(j, value ? 1 : 0);
-          }
-          break;
-        }
-        case BYTE: {
-          TinyIntVector v = (TinyIntVector) vector;
-          byte value = (byte) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case DOUBLE: {
-          Float8Vector v = (Float8Vector) vector;
-          double value = (double) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case FLOAT: {
-          Float4Vector v = (Float4Vector) vector;
-          float value = (float) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case INT: {
-          IntVector v = (IntVector) vector;
-          int value = (int) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case LONG: {
-          BigIntVector v = (BigIntVector) vector;
-          long value = (long) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case SHORT: {
-          SmallIntVector v = (SmallIntVector) vector;
-          short value = (short) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case VARCHAR:
-        case STRING: {
-          VarCharVector v = (VarCharVector) vector;
-          byte[] value = (byte[]) val;
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case TIMESTAMP: {
-          TimeStampVector v = (TimeStampVector) vector;
-          DateTime ts = new DateTime(((Timestamp) val).getTime()).withZoneRetainFields(DateTimeZone.UTC);
-          long value = ts.getMillis();
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case DATE: {
-          DateVector v = (DateVector) vector;
-          DateTime date = new DateTime(((Date)val).getTime()).withZoneRetainFields(DateTimeZone.UTC);
-          long value = date.getMillis();
-          for (int j = 0; j < recordCount; j++) {
-            v.getMutator().setSafe(j, value);
-          }
-          break;
-        }
-        case DECIMAL: {
-          populateDecimalPartitionVector((DecimalTypeInfo)selectedPartitionTypes.get(i), vector,
-              ((HiveDecimal)val).bigDecimalValue(), recordCount);
-          break;
-        }
-        default:
-          throwUnsupportedHiveDataTypeError(pCat.toString());
+      if (val != null) {
+        HiveUtilities.populateVector(vector, managedBuffer, val, 0, recordCount);
       }
+
       vector.getMutator().setValueCount(recordCount);
     }
   }
 
-  private void populateDecimalPartitionVector(DecimalTypeInfo typeInfo, ValueVector vector, BigDecimal bigDecimal,
-      int recordCount) {
-    int precision = typeInfo.precision();
-    int scale = typeInfo.scale();
-    if (precision <= 9) {
-      Decimal9Holder holder = new Decimal9Holder();
-      holder.scale = scale;
-      holder.precision = precision;
-      holder.value = DecimalUtility.getDecimal9FromBigDecimal(bigDecimal, precision, scale);
-      Decimal9Vector v = (Decimal9Vector) vector;
-      for (int j = 0; j < recordCount; j++) {
-        v.getMutator().setSafe(j, holder);
-      }
-    } else if (precision <= 18) {
-      Decimal18Holder holder = new Decimal18Holder();
-      holder.scale = scale;
-      holder.precision = precision;
-      holder.value = DecimalUtility.getDecimal18FromBigDecimal(bigDecimal, precision, scale);
-      Decimal18Vector v = (Decimal18Vector) vector;
-      for (int j = 0; j < recordCount; j++) {
-        v.getMutator().setSafe(j, holder);
-      }
-    } else if (precision <= 28) {
-      Decimal28SparseHolder holder = new Decimal28SparseHolder();
-      holder.scale = scale;
-      holder.precision = precision;
-      holder.buffer = fragmentContext.getManagedBuffer(
-          Decimal28SparseHolder.nDecimalDigits * DecimalUtility.integerSize);
-      holder.start = 0;
-      DecimalUtility.getSparseFromBigDecimal(bigDecimal, holder.buffer, 0, scale, precision,
-          Decimal28SparseHolder.nDecimalDigits);
-      Decimal28SparseVector v = (Decimal28SparseVector) vector;
-      for (int j = 0; j < recordCount; j++) {
-        v.getMutator().setSafe(j, holder);
-      }
-    } else {
-      Decimal38SparseHolder holder = new Decimal38SparseHolder();
-      holder.scale = scale;
-      holder.precision = precision;
-      holder.buffer = fragmentContext.getManagedBuffer(
-          Decimal38SparseHolder.nDecimalDigits * DecimalUtility.integerSize);
-      holder.start = 0;
-      DecimalUtility.getSparseFromBigDecimal(bigDecimal, holder.buffer, 0, scale, precision,
-          Decimal38SparseHolder.nDecimalDigits);
-      Decimal38SparseVector v = (Decimal38SparseVector) vector;
-      for (int j = 0; j < recordCount; j++) {
-        v.getMutator().setSafe(j, holder);
-      }
-    }
-  }
+  /**
+   * SkipRecordsInspector encapsulates logic to skip header and footer from file.
+   * Logic is applicable only for predefined in constructor file formats.
+   */
+  private class SkipRecordsInspector {
 
-  /** Partition value is received in string format. Convert it into appropriate object based on the type. */
-  private Object convertPartitionType(TypeInfo typeInfo, String value) {
-    if (typeInfo.getCategory() != Category.PRIMITIVE) {
-      // In Hive only primitive types are allowed as partition column types.
-      throw new DrillRuntimeException("Non-Primitive types are not allowed as partition column type in Hive, " +
-          "but received one: " + typeInfo.getCategory());
+    private final Set<Object> fileFormats;
+    private int headerCount;
+    private int footerCount;
+    private Queue<Object> footerBuffer;
+    // indicates if we continue reading the same file
+    private boolean continuance;
+    private int holderIndex;
+    private List<Object> valueHolder;
+    private int actualCount;
+    // actualCount without headerCount, used to determine holderIndex
+    private int tempCount;
+
+    private SkipRecordsInspector(Properties tableProperties, RecordReader reader) {
+      this.fileFormats = new HashSet<Object>(Arrays.asList(org.apache.hadoop.mapred.TextInputFormat.class.getName()));
+      this.headerCount = retrievePositiveIntProperty(tableProperties, serdeConstants.HEADER_COUNT, 0);
+      this.footerCount = retrievePositiveIntProperty(tableProperties, serdeConstants.FOOTER_COUNT, 0);
+      this.footerBuffer = Lists.newLinkedList();
+      this.continuance = false;
+      this.holderIndex = -1;
+      this.valueHolder = initializeValueHolder(reader, footerCount);
+      this.actualCount = 0;
+      this.tempCount = 0;
     }
 
-    PrimitiveCategory pCat = ((PrimitiveTypeInfo) typeInfo).getPrimitiveCategory();
-    switch (pCat) {
-      case BINARY:
-        return value.getBytes();
-      case BOOLEAN:
-        return Boolean.parseBoolean(value);
-      case BYTE:
-        return Byte.parseByte(value);
-      case DECIMAL: {
-        DecimalTypeInfo decimalTypeInfo = (DecimalTypeInfo) typeInfo;
-        return HiveDecimalUtils.enforcePrecisionScale(HiveDecimal.create(value),
-            decimalTypeInfo.precision(), decimalTypeInfo.scale());
-      }
-      case DOUBLE:
-        return Double.parseDouble(value);
-      case FLOAT:
-        return Float.parseFloat(value);
-      case INT:
-        return Integer.parseInt(value);
-      case LONG:
-        return Long.parseLong(value);
-      case SHORT:
-        return Short.parseShort(value);
-      case STRING:
-      case VARCHAR:
-        return value.getBytes();
-      case TIMESTAMP:
-        return Timestamp.valueOf(value);
-      case DATE:
-        return Date.valueOf(value);
+    private boolean doSkipHeader(int recordCount) {
+      return !continuance && recordCount < headerCount;
     }
 
-    throwUnsupportedHiveDataTypeError(pCat.toString());
-    return null;
-  }
+    private void reset() {
+      tempCount = holderIndex + 1;
+      actualCount = 0;
+      if (!continuance) {
+        footerBuffer.clear();
+      }
+    }
 
-  public static void throwUnsupportedHiveDataTypeError(String unsupportedType) {
-    StringBuilder errMsg = new StringBuilder();
-    errMsg.append(String.format("Unsupported Hive data type %s. ", unsupportedType));
-    errMsg.append(System.getProperty("line.separator"));
-    errMsg.append("Following Hive data types are supported in Drill for querying: ");
-    errMsg.append(
-        "BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, DATE, TIMESTAMP, BINARY, DECIMAL, STRING, and VARCHAR");
+    private Object bufferAdd(Object value) throws SerDeException {
+      footerBuffer.add(value);
+      if (footerBuffer.size() <= footerCount) {
+        return null;
+      }
+      return footerBuffer.poll();
+    }
 
-    throw new RuntimeException(errMsg.toString());
+    private Object getNextValue() {
+      holderIndex = tempCount % getHolderSize();
+      return valueHolder.get(holderIndex);
+    }
+
+    private int getHolderSize() {
+      return valueHolder.size();
+    }
+
+    private void updateContinuance() {
+      this.continuance = actualCount != 0;
+    }
+
+    private int incrementTempCount() {
+      return ++tempCount;
+    }
+
+    private int getActualCount() {
+      return actualCount;
+    }
+
+    private int incrementActualCount() {
+      return ++actualCount;
+    }
+
+    /**
+     * Retrieves positive numeric property from Properties object by name.
+     * Return default value if
+     * 1. file format is absent in predefined file formats list
+     * 2. property doesn't exist in table properties
+     * 3. property value is negative
+     * otherwise casts value to int.
+     *
+     * @param tableProperties property holder
+     * @param propertyName    name of the property
+     * @param defaultValue    default value
+     * @return property numeric value
+     * @throws NumberFormatException if property value is non-numeric
+     */
+    private int retrievePositiveIntProperty(Properties tableProperties, String propertyName, int defaultValue) {
+      int propertyIntValue = defaultValue;
+      if (!fileFormats.contains(tableProperties.get(hive_metastoreConstants.FILE_INPUT_FORMAT))) {
+        return propertyIntValue;
+      }
+      Object propertyObject = tableProperties.get(propertyName);
+      if (propertyObject != null) {
+        try {
+          propertyIntValue = Integer.valueOf((String) propertyObject);
+        } catch (NumberFormatException e) {
+          throw new NumberFormatException(String.format("Hive table property %s value '%s' is non-numeric", propertyName, propertyObject.toString()));
+        }
+      }
+      return propertyIntValue < 0 ? defaultValue : propertyIntValue;
+    }
+
+    /**
+     * Creates buffer of objects to be used as values, so these values can be re-used.
+     * Objects number depends on number of lines to skip in the end of the file plus one object.
+     *
+     * @param reader          RecordReader to return value object
+     * @param skipFooterLines number of lines to skip at the end of the file
+     * @return list of objects to be used as values
+     */
+    private List<Object> initializeValueHolder(RecordReader reader, int skipFooterLines) {
+      List<Object> valueHolder = new ArrayList<>(skipFooterLines + 1);
+      for (int i = 0; i <= skipFooterLines; i++) {
+        valueHolder.add(reader.createValue());
+      }
+      return valueHolder;
+    }
   }
 }

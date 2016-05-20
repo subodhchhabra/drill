@@ -48,7 +48,7 @@ import com.google.common.collect.Range;
 
 public class BlockMapBuilder {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(BlockMapBuilder.class);
-  static final MetricRegistry metrics = DrillMetrics.getInstance();
+  static final MetricRegistry metrics = DrillMetrics.getRegistry();
   static final String BLOCK_MAP_BUILDER_TIMER = MetricRegistry.name(BlockMapBuilder.class, "blockMapBuilderTimer");
 
   private final Map<Path,ImmutableRangeMap<Long,BlockLocation>> blockMapMap = Maps.newConcurrentMap();
@@ -84,6 +84,12 @@ public class BlockMapBuilder {
 
   private class BlockMapReader extends TimedRunnable<List<CompleteFileWork>> {
     final FileStatus status;
+
+    // This variable blockify indicates if a single file can be read by multiple threads
+    // For examples, for CSV, it is set as true
+    // because each row in a CSV file can be considered as an independent record;
+    // for json, it is set as false
+    // because each row in a json file cannot be determined as a record or not simply by that row alone
     final boolean blockify;
 
     public BlockMapReader(FileStatus status, boolean blockify) {
@@ -112,6 +118,14 @@ public class BlockMapBuilder {
 
       if (!blockify || error || compressed(status)) {
         work.add(new CompleteFileWork(getEndpointByteMap(new FileStatusWork(status)), 0, status.getLen(), status.getPath().toString()));
+      }
+
+      // This if-condition is specific for empty CSV file
+      // For CSV files, the global variable blockify is set as true
+      // And if this CSV file is empty, rangeMap would be empty also
+      // Therefore, at the point before this if-condition, work would not be populated
+      if(work.isEmpty()) {
+        work.add(new CompleteFileWork(getEndpointByteMap(new FileStatusWork(status)), 0, 0, status.getPath().toString()));
       }
 
       return work;
@@ -202,8 +216,7 @@ public class BlockMapBuilder {
    * @throws IOException
    */
   public EndpointByteMap getEndpointByteMap(FileWork work) throws IOException {
-    Stopwatch watch = new Stopwatch();
-    watch.start();
+    Stopwatch watch = Stopwatch.createStarted();
     Path fileName = new Path(work.getPath());
 
 
@@ -253,8 +266,7 @@ public class BlockMapBuilder {
    * Builds a mapping of Drillbit endpoints to hostnames
    */
   private static ImmutableMap<String, DrillbitEndpoint> buildEndpointMap(Collection<DrillbitEndpoint> endpoints) {
-    Stopwatch watch = new Stopwatch();
-    watch.start();
+    Stopwatch watch = Stopwatch.createStarted();
     HashMap<String, DrillbitEndpoint> endpointMap = Maps.newHashMap();
     for (DrillbitEndpoint d : endpoints) {
       String hostName = d.getAddress();

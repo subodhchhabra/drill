@@ -33,10 +33,10 @@ import org.apache.hadoop.hive.serde2.typeinfo.PrimitiveTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.StructTypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfo;
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoUtils;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.sql.SqlCollation;
-import org.eigenbase.sql.type.SqlTypeName;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.sql.SqlCollation;
+import org.apache.calcite.sql.type.SqlTypeName;
 
 import com.google.common.collect.Lists;
 
@@ -45,8 +45,8 @@ public class DrillHiveTable extends DrillTable{
 
   protected final Table hiveTable;
 
-  public DrillHiveTable(String storageEngineName, HiveStoragePlugin plugin, HiveReadEntry readEntry) {
-    super(storageEngineName, plugin, readEntry);
+  public DrillHiveTable(String storageEngineName, HiveStoragePlugin plugin, String userName, HiveReadEntry readEntry) {
+    super(storageEngineName, plugin, userName, readEntry);
     this.hiveTable = new Table(readEntry.getTable());
   }
 
@@ -82,10 +82,8 @@ public class DrillHiveTable extends DrillTable{
         return typeFactory.createSqlType(SqlTypeName.BOOLEAN);
 
       case BYTE:
-        return typeFactory.createSqlType(SqlTypeName.TINYINT);
-
       case SHORT:
-        return typeFactory.createSqlType(SqlTypeName.SMALLINT);
+        return typeFactory.createSqlType(SqlTypeName.INTEGER);
 
       case INT:
         return typeFactory.createSqlType(SqlTypeName.INTEGER);
@@ -106,7 +104,7 @@ public class DrillHiveTable extends DrillTable{
         return typeFactory.createSqlType(SqlTypeName.TIMESTAMP);
 
       case BINARY:
-        return typeFactory.createSqlType(SqlTypeName.BINARY);
+        return typeFactory.createSqlType(SqlTypeName.VARBINARY);
 
       case DECIMAL: {
         DecimalTypeInfo decimalTypeInfo = (DecimalTypeInfo)pTypeInfo;
@@ -120,6 +118,15 @@ public class DrillHiveTable extends DrillTable{
           typeFactory.createSqlType(SqlTypeName.VARCHAR, maxLen), /*input type*/
           Charset.forName("ISO-8859-1"), /*unicode char set*/
           SqlCollation.IMPLICIT /* TODO: need to decide if implicit is the correct one */
+        );
+      }
+
+      case CHAR: {
+        int maxLen = TypeInfoUtils.getCharacterLengthForType(pTypeInfo);
+        return typeFactory.createTypeWithCharsetAndCollation(
+            typeFactory.createSqlType(SqlTypeName.CHAR, maxLen), /*input type*/
+            Charset.forName("ISO-8859-1"), /*unicode char set*/
+            SqlCollation.IMPLICIT
         );
       }
 
@@ -177,7 +184,7 @@ public class DrillHiveTable extends DrillTable{
     errMsg.append(System.getProperty("line.separator"));
     errMsg.append("Following Hive data types are supported in Drill INFORMATION_SCHEMA: ");
     errMsg.append("BOOLEAN, BYTE, SHORT, INT, LONG, FLOAT, DOUBLE, DATE, TIMESTAMP, BINARY, DECIMAL, STRING, " +
-        "VARCHAR, LIST, MAP, STRUCT and UNION");
+        "VARCHAR, CHAR, LIST, MAP, STRUCT and UNION");
 
     throw new RuntimeException(errMsg.toString());
   }

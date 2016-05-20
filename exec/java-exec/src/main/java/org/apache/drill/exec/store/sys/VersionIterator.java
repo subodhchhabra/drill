@@ -23,6 +23,7 @@ import java.util.Iterator;
 import java.util.Properties;
 
 import com.google.common.io.Resources;
+import org.apache.drill.common.util.DrillVersionInfo;
 
 public class VersionIterator implements Iterator<Object>{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(VersionIterator.class);
@@ -30,6 +31,7 @@ public class VersionIterator implements Iterator<Object>{
   public boolean beforeFirst = true;
 
   public static class VersionInfo {
+    public String version = "Unknown";
     public String commit_id = "Unknown";
     public String commit_message = "";
     public String commit_time = "";
@@ -38,10 +40,11 @@ public class VersionIterator implements Iterator<Object>{
 
     public VersionInfo(){
       try {
+        version = DrillVersionInfo.getVersion(); // get drill version (x.y.z)
         URL u = Resources.getResource("git.properties");
         if(u != null){
           Properties p = new Properties();
-          p.load(Resources.newInputStreamSupplier(u).getInput());
+          p.load(Resources.asByteSource(u).openStream());
           commit_id = p.getProperty("git.commit.id");
           build_email = p.getProperty("git.build.user.email");
           commit_time = p.getProperty("git.commit.time");
@@ -54,6 +57,7 @@ public class VersionIterator implements Iterator<Object>{
       }
     }
   }
+
   @Override
   public boolean hasNext() {
     return beforeFirst;
@@ -72,6 +76,5 @@ public class VersionIterator implements Iterator<Object>{
   public void remove() {
     throw new UnsupportedOperationException();
   }
-
 
 }

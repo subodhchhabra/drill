@@ -24,29 +24,33 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.drill.common.config.DrillConfig;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.common.types.Types;
 import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.TypeHelper;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.record.BatchSchema;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
+import org.apache.drill.exec.record.CloseableRecordBatch;
 import org.apache.drill.exec.record.MaterializedField;
-import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.record.VectorWrapper;
 import org.apache.drill.exec.record.WritableBatch;
 import org.apache.drill.exec.record.selection.SelectionVector2;
 import org.apache.drill.exec.record.selection.SelectionVector4;
+import org.apache.drill.exec.server.options.OptionValue;
 import org.apache.drill.exec.store.RecordReader;
+import org.apache.drill.exec.testing.ControlsInjector;
+import org.apache.drill.exec.testing.ControlsInjectorFactory;
+import org.apache.drill.exec.util.CallBack;
 import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.NullableVarCharVector;
 import org.apache.drill.exec.vector.SchemaChangeCallBack;
@@ -58,15 +62,17 @@ import com.google.common.collect.Maps;
 /**
  * Record batch used for a particular scan. Operators against one or more
  */
-public class ScanBatch implements RecordBatch {
+public class ScanBatch implements CloseableRecordBatch {
   private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ScanBatch.class);
+  private static final ControlsInjector injector = ControlsInjectorFactory.getInjector(ScanBatch.class);
 
-  private static final int MAX_RECORD_CNT = Character.MAX_VALUE;
-
-  private final Map<MaterializedField.Key, ValueVector> fieldVectorMap = Maps.newHashMap();
-
+  /** Main collection of fields' value vectors. */
   private final VectorContainer container = new VectorContainer();
-  private VectorContainer tempContainer;
+
+  /** Fields' value vectors indexed by fields' keys. */
+  private final Map<String, ValueVector> fieldVectorMap =
+      Maps.newHashMap();
+
   private int recordCount;
   private final FragmentContext context;
   private final OperatorContext oContext;
@@ -79,47 +85,62 @@ public class ScanBatch implements RecordBatch {
   private List<ValueVector> partitionVectors;
   private List<Integer> selectedPartitionColumns;
   private String partitionColumnDesignator;
-  private boolean first = true;
   private boolean done = false;
   private SchemaChangeCallBack callBack = new SchemaChangeCallBack();
+  private boolean hasReadNonEmptyFile = false;
 
-  public ScanBatch(PhysicalOperator subScanConfig, FragmentContext context, OperatorContext oContext,
-                   Iterator<RecordReader> readers, List<String[]> partitionColumns, List<Integer> selectedPartitionColumns) throws ExecutionSetupException {
+
+  public ScanBatch(PhysicalOperator subScanConfig, FragmentContext context,
+                   OperatorContext oContext, Iterator<RecordReader> readers,
+                   List<String[]> partitionColumns,
+                   List<Integer> selectedPartitionColumns) throws ExecutionSetupException {
     this.context = context;
     this.readers = readers;
     if (!readers.hasNext()) {
       throw new ExecutionSetupException("A scan batch must contain at least one reader.");
     }
-    this.currentReader = readers.next();
+    currentReader = readers.next();
     this.oContext = oContext;
-    this.currentReader.setOperatorContext(this.oContext);
 
+    boolean setup = false;
     try {
       oContext.getStats().startProcessing();
-      this.currentReader.setup(mutator);
+      currentReader.setup(oContext, mutator);
+      setup = true;
     } finally {
+      // if we had an exception during setup, make sure to release existing data.
+      if (!setup) {
+        try {
+          currentReader.close();
+        } catch(final Exception e) {
+          throw new ExecutionSetupException(e);
+        }
+      }
       oContext.getStats().stopProcessing();
     }
     this.partitionColumns = partitionColumns.iterator();
-    this.partitionValues = this.partitionColumns.hasNext() ? this.partitionColumns.next() : null;
+    partitionValues = this.partitionColumns.hasNext() ? this.partitionColumns.next() : null;
     this.selectedPartitionColumns = selectedPartitionColumns;
-    DrillConfig config = context.getConfig();
-    this.partitionColumnDesignator = config == null ? "dir" : config.getString(ExecConstants.FILESYSTEM_PARTITION_COLUMN_LABEL);
+
+    // TODO Remove null check after DRILL-2097 is resolved. That JIRA refers to test cases that do not initialize
+    // options; so labelValue = null.
+    final OptionValue labelValue = context.getOptions().getOption(ExecConstants.FILESYSTEM_PARTITION_COLUMN_LABEL);
+    partitionColumnDesignator = labelValue == null ? "dir" : labelValue.string_val;
+
     addPartitionVectors();
   }
 
-  public ScanBatch(PhysicalOperator subScanConfig, FragmentContext context, Iterator<RecordReader> readers) throws ExecutionSetupException {
+  public ScanBatch(PhysicalOperator subScanConfig, FragmentContext context,
+                   Iterator<RecordReader> readers)
+      throws ExecutionSetupException {
     this(subScanConfig, context,
-        new OperatorContext(subScanConfig, context, false /* ScanBatch is not subject to fragment memory limit */),
+        context.newOperatorContext(subScanConfig),
         readers, Collections.<String[]> emptyList(), Collections.<Integer> emptyList());
   }
 
+  @Override
   public FragmentContext getContext() {
     return context;
-  }
-
-  public OperatorContext getOperatorContext() {
-    return oContext;
   }
 
   @Override
@@ -145,48 +166,68 @@ public class ScanBatch implements RecordBatch {
     container.zeroVectors();
   }
 
+  private void clearFieldVectorMap() {
+    for (final ValueVector v : fieldVectorMap.values()) {
+      v.clear();
+    }
+  }
+
   @Override
   public IterOutcome next() {
     if (done) {
       return IterOutcome.NONE;
     }
-    long t1 = System.nanoTime();
     oContext.getStats().startProcessing();
     try {
       try {
+        injector.injectChecked(context.getExecutionControls(), "next-allocate", OutOfMemoryException.class);
+
         currentReader.allocate(fieldVectorMap);
       } catch (OutOfMemoryException e) {
-        logger.debug("Caught OutOfMemoryException");
-        for (ValueVector v : fieldVectorMap.values()) {
-          v.clear();
-        }
+        logger.debug("Caught Out of Memory Exception", e);
+        clearFieldVectorMap();
         return IterOutcome.OUT_OF_MEMORY;
       }
       while ((recordCount = currentReader.next()) == 0) {
         try {
           if (!readers.hasNext()) {
-            currentReader.cleanup();
+            // We're on the last reader, and it has no (more) rows.
+            currentReader.close();
             releaseAssets();
-            done = true;
+            done = true;  // have any future call to next() return NONE
+
             if (mutator.isNewSchema()) {
+              // This last reader has a new schema (e.g., we have a zero-row
+              // file or other source).  (Note that some sources have a non-
+              // null/non-trivial schema even when there are no rows.)
+
               container.buildSchema(SelectionVectorMode.NONE);
               schema = container.getSchema();
+
+              return IterOutcome.OK_NEW_SCHEMA;
             }
             return IterOutcome.NONE;
           }
+          // At this point, the reader that hit its end is not the last reader.
 
-          currentReader.cleanup();
+          // If all the files we have read so far are just empty, the schema is not useful
+          if (! hasReadNonEmptyFile) {
+            container.clear();
+            for (ValueVector v : fieldVectorMap.values()) {
+              v.clear();
+            }
+            fieldVectorMap.clear();
+          }
+
+          currentReader.close();
           currentReader = readers.next();
           partitionValues = partitionColumns.hasNext() ? partitionColumns.next() : null;
-          currentReader.setup(mutator);
-          currentReader.setOperatorContext(oContext);
+          currentReader.setup(oContext, mutator);
           try {
             currentReader.allocate(fieldVectorMap);
           } catch (OutOfMemoryException e) {
             logger.debug("Caught OutOfMemoryException");
-            for (ValueVector v : fieldVectorMap.values()) {
-              v.clear();
-            }
+            clearFieldVectorMap();
             return IterOutcome.OUT_OF_MEMORY;
           }
           addPartitionVectors();
@@ -197,15 +238,30 @@ public class ScanBatch implements RecordBatch {
           return IterOutcome.STOP;
         }
       }
+      // At this point, the current reader has read 1 or more rows.
 
+      hasReadNonEmptyFile = true;
       populatePartitionVectors();
-      if (mutator.isNewSchema()) {
+
+      for (VectorWrapper w : container) {
+        w.getValueVector().getMutator().setValueCount(recordCount);
+      }
+
+
+      // this is a slight misuse of this metric but it will allow Readers to report how many records they generated.
+      final boolean isNewSchema = mutator.isNewSchema();
+      oContext.getStats().batchReceived(0, getRecordCount(), isNewSchema);
+
+      if (isNewSchema) {
         container.buildSchema(SelectionVectorMode.NONE);
         schema = container.getSchema();
         return IterOutcome.OK_NEW_SCHEMA;
       } else {
         return IterOutcome.OK;
       }
+    } catch (OutOfMemoryException ex) {
+      context.fail(UserException.memoryError(ex).build(logger));
+      return IterOutcome.STOP;
     } catch (Exception ex) {
       logger.debug("Failed to read the batch. Stopping...", ex);
       context.fail(ex);
@@ -215,7 +271,7 @@ public class ScanBatch implements RecordBatch {
     }
   }
 
-  private void addPartitionVectors() throws ExecutionSetupException{
+  private void addPartitionVectors() throws ExecutionSetupException {
     try {
       if (partitionVectors != null) {
         for (ValueVector v : partitionVectors) {
@@ -224,8 +280,10 @@ public class ScanBatch implements RecordBatch {
       }
       partitionVectors = Lists.newArrayList();
       for (int i : selectedPartitionColumns) {
-        MaterializedField field = MaterializedField.create(SchemaPath.getSimplePath(partitionColumnDesignator + i), Types.optional(MinorType.VARCHAR));
-        ValueVector v = mutator.addField(field, NullableVarCharVector.class);
+        final MaterializedField field =
+            MaterializedField.create(SchemaPath.getSimplePath(partitionColumnDesignator + i).getAsUnescapedPath(),
+                                     Types.optional(MinorType.VARCHAR));
+        final ValueVector v = mutator.addField(field, NullableVarCharVector.class);
         partitionVectors.add(v);
       }
     } catch(SchemaChangeException e) {
@@ -235,12 +293,12 @@ public class ScanBatch implements RecordBatch {
 
   private void populatePartitionVectors() {
     for (int index = 0; index < selectedPartitionColumns.size(); index++) {
-      int i = selectedPartitionColumns.get(index);
-      NullableVarCharVector v = (NullableVarCharVector) partitionVectors.get(index);
+      final int i = selectedPartitionColumns.get(index);
+      final NullableVarCharVector v = (NullableVarCharVector) partitionVectors.get(index);
       if (partitionValues.length > i) {
-        String val = partitionValues[i];
+        final String val = partitionValues[i];
         AllocationHelper.allocate(v, recordCount, val.length());
-        byte[] bytes = val.getBytes();
+        final byte[] bytes = val.getBytes();
         for (int j = 0; j < recordCount; j++) {
           v.getMutator().setSafe(j, bytes, 0, bytes.length);
         }
@@ -272,51 +330,65 @@ public class ScanBatch implements RecordBatch {
     return container.getValueAccessorById(clazz, ids);
   }
 
-
-
   private class Mutator implements OutputMutator {
+    /** Whether schema has changed since last inquiry (via #isNewSchema}).  Is
+     *  true before first inquiry. */
+    private boolean schemaChanged = true;
 
-    boolean schemaChange = true;
 
     @SuppressWarnings("unchecked")
     @Override
-    public <T extends ValueVector> T addField(MaterializedField field, Class<T> clazz) throws SchemaChangeException {
-      // Check if the field exists
-      ValueVector v = fieldVectorMap.get(field.key());
-
+    public <T extends ValueVector> T addField(MaterializedField field,
+                                              Class<T> clazz) throws SchemaChangeException {
+      // Check if the field exists.
+      ValueVector v = fieldVectorMap.get(field.getPath());
       if (v == null || v.getClass() != clazz) {
-        // Field does not exist add it to the map and the output container
+        // Field does not exist--add it to the map and the output container.
         v = TypeHelper.getNewVector(field, oContext.getAllocator(), callBack);
         if (!clazz.isAssignableFrom(v.getClass())) {
-          throw new SchemaChangeException(String.format("The class that was provided %s does not correspond to the expected vector type of %s.", clazz.getSimpleName(), v.getClass().getSimpleName()));
+          throw new SchemaChangeException(
+              String.format(
+                  "The class that was provided, %s, does not correspond to the "
+                  + "expected vector type of %s.",
+                  clazz.getSimpleName(), v.getClass().getSimpleName()));
         }
 
-        ValueVector old = fieldVectorMap.put(field.key(), v);
-        if(old != null){
+        final ValueVector old = fieldVectorMap.put(field.getPath(), v);
+        if (old != null) {
           old.clear();
           container.remove(old);
         }
 
         container.add(v);
-        // Adding new vectors to the container mark that the schema has changed
-        schemaChange = true;
+        // Added new vectors to the container--mark that the schema has changed.
+        schemaChanged = true;
       }
 
-      return (T) v;
+      return clazz.cast(v);
     }
 
     @Override
     public void allocate(int recordCount) {
-      for (ValueVector v : fieldVectorMap.values()) {
+      for (final ValueVector v : fieldVectorMap.values()) {
         AllocationHelper.allocate(v, recordCount, 50, 10);
       }
     }
 
+    /**
+     * Reports whether schema has changed (field was added or re-added) since
+     * last call to {@link #isNewSchema}.  Returns true at first call.
+     */
     @Override
     public boolean isNewSchema() {
-      // Check if top level schema has changed, second condition checks if one of the deeper map schema has changed
-      if (schemaChange == true || callBack.getSchemaChange()) {
-        schemaChange = false;
+      // Check if top-level schema or any of the deeper map schemas has changed.
+
+      // Note:  Callback's getSchemaChangedAndReset() must get called in order
+      // to reset it and avoid false reports of schema changes in future.  (Be
+      // careful with short-circuit OR (||) operator.)
+
+      final boolean deeperSchemaChanged = callBack.getSchemaChangedAndReset();
+      if (schemaChanged || deeperSchemaChanged) {
+        schemaChanged = false;
         return true;
       }
       return false;
@@ -325,6 +397,11 @@ public class ScanBatch implements RecordBatch {
     @Override
     public DrillBuf getManagedBuffer() {
       return oContext.getManagedBuffer();
+    }
+
+    @Override
+    public CallBack getCallBack() {
+      return callBack;
     }
   }
 
@@ -338,22 +415,20 @@ public class ScanBatch implements RecordBatch {
     return WritableBatch.get(this);
   }
 
-  public void cleanup() {
+  @Override
+  public void close() throws Exception {
     container.clear();
-    if (tempContainer != null) {
-      tempContainer.clear();
-    }
-    for (ValueVector v : partitionVectors) {
+    for (final ValueVector v : partitionVectors) {
       v.clear();
     }
     fieldVectorMap.clear();
-    currentReader.cleanup();
-    oContext.close();
+    currentReader.close();
   }
 
   @Override
   public VectorContainer getOutgoingContainer() {
-    throw new UnsupportedOperationException(String.format(" You should not call getOutgoingContainer() for class %s", this.getClass().getCanonicalName()));
+    throw new UnsupportedOperationException(
+        String.format("You should not call getOutgoingContainer() for class %s",
+                      this.getClass().getCanonicalName()));
   }
-
 }

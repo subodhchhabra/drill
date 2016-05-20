@@ -20,35 +20,18 @@ package org.apache.drill.exec.expr.fn.impl;
 
 import org.apache.drill.exec.expr.DrillSimpleFunc;
 import org.apache.drill.exec.expr.annotations.FunctionTemplate;
-import org.apache.drill.exec.expr.annotations.FunctionTemplate.NullHandling;
 import org.apache.drill.exec.expr.annotations.Output;
 import org.apache.drill.exec.expr.annotations.Param;
 import org.apache.drill.exec.expr.holders.BitHolder;
-import org.apache.drill.exec.expr.holders.NullableBitHolder;
-import org.apache.drill.exec.record.RecordBatch;
 
 public class Not {
-
-  @FunctionTemplate(names = {"not"}, scope = FunctionTemplate.FunctionScope.SIMPLE, nulls = NullHandling.NULL_IF_NULL)
-  public static class Optional implements DrillSimpleFunc {
-
-    @Param NullableBitHolder in;
-    @Output BitHolder out;
-
-    public void setup(RecordBatch incoming) { }
-
-    public void eval() {
-      out.value = (in.value == 0 ? 1 : 0);
-    }
-  }
-
-  @FunctionTemplate(names = {"not"}, scope = FunctionTemplate.FunctionScope.SIMPLE, nulls = FunctionTemplate.NullHandling.INTERNAL)
+  @FunctionTemplate(names = {"not"}, scope = FunctionTemplate.FunctionScope.SIMPLE, nulls = FunctionTemplate.NullHandling.NULL_IF_NULL)
   public static class Required implements DrillSimpleFunc {
 
     @Param BitHolder in;
     @Output BitHolder out;
 
-    public void setup(RecordBatch incoming) { }
+    public void setup() { }
 
     public void eval() {
       out.value = in.value == 0 ? 1 : 0;

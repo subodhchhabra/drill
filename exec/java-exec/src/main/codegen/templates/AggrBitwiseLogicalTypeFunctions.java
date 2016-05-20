@@ -55,7 +55,6 @@ import org.apache.drill.exec.expr.holders.UInt4Holder;
 import org.apache.drill.exec.expr.holders.NullableUInt4Holder;
 import org.apache.drill.exec.expr.holders.UInt8Holder;
 import org.apache.drill.exec.expr.holders.NullableUInt8Holder;
-import org.apache.drill.exec.record.RecordBatch;
 
 @SuppressWarnings("unused")
 
@@ -73,10 +72,13 @@ public static class ${type.inputType}${aggrtype.className} implements DrillAggFu
 
   @Param ${type.inputType}Holder in;
   @Workspace ${type.outputType}Holder inter;
+  @Workspace BigIntHolder nonNullCount;
   @Output ${type.outputType}Holder out;
 
-  public void setup(RecordBatch b) {
-  inter = new ${type.outputType}Holder();
+  public void setup() {
+    inter = new ${type.outputType}Holder();
+    nonNullCount = new BigIntHolder();
+    nonNullCount.value = 0;
 
     // Initialize the workspace variables
   <#if aggrtype.funcName == "bit_and">
@@ -95,7 +97,7 @@ public static class ${type.inputType}${aggrtype.className} implements DrillAggFu
      break sout;
     }
   </#if>
-
+    nonNullCount.value = 1;
   <#if aggrtype.funcName == "bit_and">
     inter.value = <#if type.extraCast ??>(${type.extraCast})</#if>(inter.value & in.value);
     <#elseif aggrtype.funcName == "bit_or">
@@ -109,15 +111,21 @@ public static class ${type.inputType}${aggrtype.className} implements DrillAggFu
 
   @Override
   public void output() {
-    <#if aggrtype.funcName == "bit_and">
-      out.value = inter.value;
-      <#elseif aggrtype.funcName == "bit_or">
-      out.value = inter.value;
-    </#if>
+    if (nonNullCount.value > 0) {
+      out.isSet = 1;
+      <#if aggrtype.funcName == "bit_and">
+        out.value = inter.value;
+        <#elseif aggrtype.funcName == "bit_or">
+        out.value = inter.value;
+      </#if>
+    } else {
+      out.isSet = 0;
+    }
   }
 
   @Override
   public void reset() {
+    nonNullCount.value = 0;
     <#if aggrtype.funcName == "bit_and">
       inter.value = ${type.maxval}.MAX_VALUE;
       <#elseif aggrtype.funcName == "bit_or">

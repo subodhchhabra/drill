@@ -18,7 +18,9 @@
 package org.apache.drill.hbase;
 
 import java.util.Arrays;
+import java.util.List;
 
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
@@ -59,5 +61,49 @@ public class TestHBaseQueries extends BaseHBaseTest {
       } catch (Exception e) { } // ignore
     }
 
+  }
+
+
+  @Test
+  public void testWithEmptyTable() throws Exception {
+    HBaseAdmin admin = HBaseTestsSuite.getAdmin();
+    String tableName = "drill_ut_empty_table";
+    HTable table = null;
+
+    try {
+      HTableDescriptor desc = new HTableDescriptor(tableName);
+      desc.addFamily(new HColumnDescriptor("f"));
+      admin.createTable(desc, Arrays.copyOfRange(TestTableGenerator.SPLIT_KEYS, 0, 2));
+
+      table = new HTable(admin.getConfiguration(), tableName);
+
+      setColumnWidths(new int[] {8, 15});
+      runHBaseSQLVerifyCount("SELECT row_key, count(*)\n"
+          + "FROM\n"
+          + "  hbase.`" + tableName + "` tableName GROUP BY row_key\n"
+          , 0);
+    } finally {
+      try {
+        if (table != null) {
+          table.close();
+        }
+        admin.disableTable(tableName);
+        admin.deleteTable(tableName);
+      } catch (Exception e) { } // ignore
+    }
+  }
+  @Test
+  public void testCastEmptyStrings() throws Exception {
+    try {
+        test("alter system set `drill.exec.functions.cast_empty_string_to_null` = true;");
+        setColumnWidths(new int[] {5, 4});
+        List<QueryDataBatch> resultList = runHBaseSQLlWithResults("SELECT row_key,\n"
+            + " CAST(t.f.c1 as INT) c1, CAST(t.f.c2 as BIGINT) c2, CAST(t.f.c3 as INT) c3,\n"
+            + " CAST(t.f.c4 as INT) c4 FROM hbase.TestTableNullStr t where row_key='a1'");
+        printResult(resultList);
+    }
+    finally {
+        test("alter system reset `drill.exec.functions.cast_empty_string_to_null`;");
+    }
   }
 }

@@ -29,6 +29,11 @@
           extensions: [ "tsv" ],
           delimiter: "\t"
         },
+        "ssv" : {
+          type: "text",
+          extensions: [ "ssv" ],
+          delimiter: " "
+        },
         "parquet" : {
           type: "parquet"
         },
@@ -37,7 +42,28 @@
         },
         "txt" : {
           type : "text",
-          extensions: [ "txt" ]
+          extensions: [ "txt" ],
+          delimiter: "\u0000"
+        },
+        "avro" : {
+          type: "avro"
+        },
+        "sequencefile": {
+          type: "sequencefile",
+          extensions: [ "seq" ]
+        },
+        "csvh" : {
+          type: "text",
+          extensions: [ "csvh" ],
+          delimiter: ",",
+          extractHeader: true
+        },
+        "csvh-test" : {
+          type: "text",
+          extensions: [ "csvh-test" ],
+          delimiter: ",",
+          extractHeader: true,
+          skipFirstLine: true
         }
       }
     }

@@ -20,40 +20,55 @@ package org.apache.drill.exec.physical.impl.window;
 import org.apache.drill.common.exceptions.DrillException;
 import org.apache.drill.exec.compile.TemplateClassDefinition;
 import org.apache.drill.exec.exception.SchemaChangeException;
-import org.apache.drill.exec.physical.impl.sort.RecordBatchData;
+import org.apache.drill.exec.ops.OperatorContext;
+import org.apache.drill.exec.physical.config.WindowPOP;
 import org.apache.drill.exec.record.VectorAccessible;
+import org.apache.drill.exec.record.VectorContainer;
 
+import javax.inject.Named;
 import java.util.List;
 
 public interface WindowFramer {
-  public static TemplateClassDefinition<WindowFramer> TEMPLATE_DEFINITION = new TemplateClassDefinition<>(WindowFramer.class, WindowFrameTemplate.class);
+  TemplateClassDefinition<WindowFramer> NOFRAME_TEMPLATE_DEFINITION = new TemplateClassDefinition<>(WindowFramer.class, NoFrameSupportTemplate.class);
+  TemplateClassDefinition<WindowFramer> FRAME_TEMPLATE_DEFINITION = new TemplateClassDefinition<>(WindowFramer.class, FrameSupportTemplate.class);
 
-  public abstract void setup(List<RecordBatchData> batches, VectorAccessible container) throws SchemaChangeException;
+  void setup(final List<WindowDataBatch> batches, final VectorContainer container, final OperatorContext operatorContext,
+             final boolean requireFullPartition, final WindowPOP popConfig) throws SchemaChangeException;
 
   /**
    * process the inner batch and write the aggregated values in the container
    * @throws DrillException
    */
-  public abstract void doWork() throws DrillException;
+  void doWork() throws DrillException;
 
-  /**
-   * check if current batch can be processed:
-   * <ol>
-   *   <li>we have at least 2 saved batches</li>
-   *   <li>last partition of current batch ended</li>
-   * </ol>
-   * @return true if current batch can be processed, false otherwise
-   */
-  public abstract boolean canDoWork();
   /**
    * @return number rows processed in last batch
    */
-  public abstract int getOutputCount();
+  int getOutputCount();
 
-  public abstract void cleanup();
+  void cleanup();
 
   /**
-   * @return saved batch that will be processed in doWork()
+   * compares two rows from different batches (can be the same), if they have the same value for the partition by
+   * expression
+   * @param b1Index index of first row
+   * @param b1 batch for first row
+   * @param b2Index index of second row
+   * @param b2 batch for second row
+   * @return true if the rows are in the same partition
    */
-  public abstract VectorAccessible getCurrent();
+  boolean isSamePartition(@Named("b1Index") int b1Index, @Named("b1") VectorAccessible b1,
+                                          @Named("b2Index") int b2Index, @Named("b2") VectorAccessible b2);
+
+  /**
+   * compares two rows from different batches (can be the same), if they have the same value for the order by
+   * expression
+   * @param b1Index index of first row
+   * @param b1 batch for first row
+   * @param b2Index index of second row
+   * @param b2 batch for second row
+   * @return true if the rows are in the same partition
+   */
+  boolean isPeer(@Named("b1Index") int b1Index, @Named("b1") VectorAccessible b1,
+                                 @Named("b2Index") int b2Index, @Named("b2") VectorAccessible b2);
 }

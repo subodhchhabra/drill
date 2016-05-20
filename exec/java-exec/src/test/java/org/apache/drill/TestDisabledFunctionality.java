@@ -16,7 +16,9 @@
  * limitations under the License.
  */
 package org.apache.drill;
-import org.apache.drill.exec.rpc.RpcException;
+import org.apache.drill.common.exceptions.UserException;
+import org.apache.drill.common.util.FileUtils;
+import org.apache.drill.exec.work.ExecErrorConstants;
 import org.apache.drill.exec.work.foreman.SqlUnsupportedException;
 import org.apache.drill.exec.work.foreman.UnsupportedDataTypeException;
 import org.apache.drill.exec.work.foreman.UnsupportedFunctionException;
@@ -26,24 +28,19 @@ import org.junit.Test;
 public class TestDisabledFunctionality extends BaseTestQuery{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestExampleQueries.class);
 
-  @Test(expected = RpcException.class)  // see DRILL-2054
-  public void testBooleanORExpression() throws Exception {
-        test("select (1 = 1) || (1 > 0) from cp.`tpch/nation.parquet` ");
-    }
-
-  @Test(expected = RpcException.class)  // see DRILL-2054
-  public void testBooleanORSelectClause() throws Exception {
-    test("select true || true from cp.`tpch/nation.parquet` ");
-  }
-
-  @Test(expected = RpcException.class)  // see DRILL-2054
+  @Test(expected = UserException.class)  // see DRILL-2054
   public void testBooleanORWhereClause() throws Exception {
     test("select * from cp.`tpch/nation.parquet` where (true || true) ");
   }
 
-  @Test(expected = RpcException.class)  // see DRILL-2054
+  @Test(expected = UserException.class)  // see DRILL-2054
   public void testBooleanAND() throws Exception {
     test("select true && true from cp.`tpch/nation.parquet` ");
+  }
+
+  private static void throwAsUnsupportedException(UserException ex) throws Exception {
+    SqlUnsupportedException.errorClassNameToException(ex.getOrCreatePBError(false).getException().getExceptionClass());
+    throw ex;
   }
 
   @Test(expected = UnsupportedFunctionException.class)  // see DRILL-1937
@@ -53,9 +50,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
            "where n_nationkey = " +
            "(select r_regionkey from cp.`tpch/region.parquet` " +
            "where r_regionkey = 1)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -66,29 +62,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
            "where n_nationkey = " +
            "(select r_regionkey from cp.`tpch/region.parquet` " +
            "where r_regionkey = 1)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
-    }
-  }
-
-  @Test(expected = UnsupportedRelOperatorException.class)  // see DRILL-1921
-  public void testDisabledUnion() throws Exception {
-    try {
-      test("(select n_name as name from cp.`tpch/nation.parquet`) UNION (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
-    }
-  }
-
-  @Test(expected = UnsupportedRelOperatorException.class) // see DRILL-1921
-  public void testDisabledUnionDistinct() throws Exception {
-    try {
-      test("(select n_name as name from cp.`tpch/nation.parquet`) UNION DISTINCT (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -96,9 +71,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledIntersect() throws Exception {
     try {
       test("(select n_name as name from cp.`tpch/nation.parquet`) INTERSECT (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -106,9 +80,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledIntersectALL() throws Exception {
     try {
       test("(select n_name as name from cp.`tpch/nation.parquet`) INTERSECT ALL (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -116,9 +89,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledExceptALL() throws Exception {
     try {
       test("(select n_name as name from cp.`tpch/nation.parquet`) EXCEPT ALL (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -126,9 +98,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledExcept() throws Exception {
     try {
       test("(select n_name as name from cp.`tpch/nation.parquet`) EXCEPT (select r_name as name from cp.`tpch/region.parquet`)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -136,9 +107,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledNaturalJoin() throws Exception {
     try {
       test("select * from cp.`tpch/nation.parquet` NATURAL JOIN cp.`tpch/region.parquet`");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -146,9 +116,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledCrossJoin() throws Exception {
     try {
       test("select * from cp.`tpch/nation.parquet` CROSS JOIN cp.`tpch/region.parquet`");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -156,9 +125,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledCastTINYINT() throws Exception {
     try {
       test("select cast(n_name as tinyint) from cp.`tpch/nation.parquet`;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -166,9 +134,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledCastSMALLINT() throws Exception {
     try {
       test("select cast(n_name as smallint) from cp.`tpch/nation.parquet`;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -176,9 +143,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledCastREAL() throws Exception {
     try {
       test("select cast(n_name as real) from cp.`tpch/nation.parquet`;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -186,9 +152,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
   public void testDisabledCardinality() throws Exception {
     try {
       test("select cardinality(employee_id) from cp.`employee.json`;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -197,9 +162,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
     try {
       test("select a.*, b.user_port " +
           "from cp.`employee.json` a, sys.drillbits b;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -209,9 +173,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
       test("select a.*, b.user_port " +
           "from cp.`employee.json` a, sys.drillbits b " +
           "where a.position_id <> b.user_port;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -221,9 +184,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
       test("select a.last_name, b.n_name, c.r_name " +
           "from cp.`employee.json` a, cp.`tpch/nation.parquet` b, cp.`tpch/region.parquet` c " +
           "where a.position_id > b.n_nationKey and b.n_nationKey = c.r_regionkey;");
-      } catch(Exception ex) {
-        SqlUnsupportedException.errorMessageToException(ex.getMessage());
-        throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -233,9 +195,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
       test("select a.lastname, b.n_name " +
           "from cp.`employee.json` a LEFT JOIN cp.`tpch/nation.parquet` b " +
           "ON a.position_id > b.n_nationKey;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -245,9 +206,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
       test("select a.lastname, b.n_name " +
           "from cp.`employee.json` a INNER JOIN cp.`tpch/nation.parquet` b " +
           "ON a.position_id > b.n_nationKey;");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -259,21 +219,8 @@ public class TestDisabledFunctionality extends BaseTestQuery{
           "where b.n_nationkey = " +
           "(select r_regionkey from cp.`tpch/region.parquet` " +
           "where r_regionkey = 1)");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
-    }
-  }
-
-  @Test(expected = UnsupportedRelOperatorException.class) // see DRILL-1325,
-  public void testSubqueryWithoutCorrelatedJoinCondition() throws Exception {
-    try {
-      test("select a.lastname " +
-          "from cp.`employee.json` a " +
-          "where exists (select n_name from cp.`tpch/nation.parquet` b) AND a.position_id = 10");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
-      throw ex;
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
     }
   }
 
@@ -283,9 +230,178 @@ public class TestDisabledFunctionality extends BaseTestQuery{
       test("explain plan for (select a.lastname, b.n_name " +
           "from cp.`employee.json` a INNER JOIN cp.`tpch/nation.parquet` b " +
           "ON a.position_id > b.n_nationKey);");
-    } catch(Exception ex) {
-      SqlUnsupportedException.errorMessageToException(ex.getMessage());
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+    }
+  }
+
+  @Test(expected = UnsupportedRelOperatorException.class) // see DRILL-2441
+  public void testExplainPlanOuterJoinWithInequality() throws Exception {
+    try {
+      test("explain plan for (select a.lastname, b.n_name " +
+          "from cp.`employee.json` a LEFT OUTER JOIN cp.`tpch/nation.parquet` b " +
+          "ON (a.position_id > b.n_nationKey AND a.employee_id = b.n_regionkey));");
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+    }
+  }
+
+  @Test(expected = UnsupportedRelOperatorException.class) // see DRILL-2441
+  public void testOuterJoinWithInequality() throws Exception {
+    try {
+      test("select a.lastname, b.n_name " +
+          "from cp.`employee.json` a RIGHT OUTER JOIN cp.`tpch/nation.parquet` b " +
+          "ON (a.position_id > b.n_nationKey AND a.employee_id = b.n_regionkey);");
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+    }
+  }
+
+  @Test(expected = UnsupportedFunctionException.class) // see DRILL-2181
+  public void testFlattenWithinGroupBy() throws Exception {
+    try {
+      String root = FileUtils.getResourceAsFile("/store/text/sample.json").toURI().toString();
+      String query = String.format("select flatten(j.topping) tt " +
+          "from dfs_test.`%s` j " +
+          "group by flatten(j.topping)", root);
+
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
       throw ex;
     }
   }
+
+  @Test(expected = UnsupportedFunctionException.class) // see DRILL-2181
+  public void testFlattenWithinOrderBy() throws Exception {
+    try {
+      String root = FileUtils.getResourceAsFile("/store/text/sample.json").toURI().toString();
+      String query = String.format("select flatten(j.topping) tt " +
+          "from dfs_test.`%s` j " +
+          "order by flatten(j.topping)", root);
+
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test(expected = UnsupportedFunctionException.class) // see DRILL-2181
+  public void testFlattenWithinAggFunction() throws Exception {
+    try {
+      String root = FileUtils.getResourceAsFile("/store/text/sample.json").toURI().toString();
+      String query = String.format("select count(flatten(j.topping)) tt " +
+          "from dfs_test.`%s` j", root);
+
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test(expected = UnsupportedFunctionException.class) // see DRILL-2181
+  public void testFlattenWithinDistinct() throws Exception {
+    try {
+      String root = FileUtils.getResourceAsFile("/store/text/sample.json").toURI().toString();
+      String query = String.format("select Distinct (flatten(j.topping)) tt " +
+          "from dfs_test.`%s` j", root);
+
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test // DRILL-2848
+  public void testDisableDecimalCasts() throws Exception {
+    final String query = "select cast('1.2' as decimal(9, 2)) from cp.`employee.json` limit 1";
+    errorMsgTestHelper(query, ExecErrorConstants.DECIMAL_DISABLE_ERR_MSG);
+  }
+
+  @Test // DRILL-2848
+  public void testDisableDecimalFromParquet() throws Exception {
+    final String query = "select * from cp.`parquet/decimal_dictionary.parquet`";
+    errorMsgTestHelper(query, ExecErrorConstants.DECIMAL_DISABLE_ERR_MSG);
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableRollup() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*) as cnt from cp.`tpch/nation.parquet` group by rollup(n_regionkey, n_name)";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableCube() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*) as cnt from cp.`tpch/nation.parquet` group by cube(n_regionkey, n_name)";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableGroupingSets() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*) as cnt from cp.`tpch/nation.parquet` group by grouping sets(n_regionkey, n_name)";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableGrouping() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*), GROUPING(n_regionkey) from cp.`tpch/nation.parquet` group by n_regionkey;";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableGrouping_ID() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*), GROUPING_ID(n_regionkey) from cp.`tpch/nation.parquet` group by n_regionkey;";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableGroup_ID() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*), GROUP_ID() from cp.`tpch/nation.parquet` group by n_regionkey;";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
+  @Test (expected = UnsupportedFunctionException.class) //DRILL-3802
+  public void testDisableGroupingInFilter() throws Exception{
+    try {
+      final String query = "select n_regionkey, count(*) from cp.`tpch/nation.parquet` group by n_regionkey HAVING GROUPING(n_regionkey) = 1";
+      test(query);
+    } catch(UserException ex) {
+      throwAsUnsupportedException(ex);
+      throw ex;
+    }
+  }
+
 }

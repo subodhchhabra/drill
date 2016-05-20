@@ -17,25 +17,24 @@
  */
 package org.apache.drill.exec.expr.fn.impl;
 
-import org.apache.drill.exec.util.AssertionUtil;
-
 import io.netty.buffer.DrillBuf;
 import io.netty.util.internal.PlatformDependent;
 
+import org.apache.drill.exec.memory.BoundsChecking;
+
 import com.google.common.primitives.UnsignedLongs;
 
-public final class XXHash {
+public final class XXHash extends DrillHash{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(XXHash.class);
 
-  private static final boolean BOUNDS_CHECKING_ENABLED = AssertionUtil.BOUNDS_CHECKING_ENABLED;
+  //UnsignedLongs.decode won't give right output(keep the value in 8 bytes unchanged).
+  static final long PRIME64_1 = 0x9e3779b185ebca87L;//UnsignedLongs.decode("11400714785074694791");
+  static final long PRIME64_2 = 0xc2b2ae3d27d4eb4fL;//UnsignedLongs.decode("14029467366897019727");
+  static final long PRIME64_3 = 0x165667b19e3779f9L;//UnsignedLongs.decode("1609587929392839161");
+  static final long PRIME64_4 = 0x85ebca77c2b2ae63L;//UnsignedLongs.decode("9650029242287828579");
+  static final long PRIME64_5 = 0x27d4eb2f165667c5L;//UnsignedLongs.decode("2870177450012600261");
 
-  static final long PRIME64_1 = UnsignedLongs.decode("11400714785074694791");
-  static final long PRIME64_2 = UnsignedLongs.decode("14029467366897019727");
-  static final long PRIME64_3 = UnsignedLongs.decode("1609587929392839161");
-  static final long PRIME64_4 = UnsignedLongs.decode("9650029242287828579");
-  static final long PRIME64_5 = UnsignedLongs.decode("2870177450012600261");
-
-  private static long hash64(long start, long bEnd, long seed) {
+  private static long hash64bytes(long start, long bEnd, long seed) {
     long len = bEnd - start;
     long h64;
     long p = start;
@@ -116,12 +115,14 @@ public final class XXHash {
     }
 
     if (p + 4 <= bEnd) {
-      h64 ^= PlatformDependent.getInt(p) * PRIME64_1;
+      //IMPORTANT: we are expecting a long from these 4 bytes. Which means it is always positive
+      long finalInt = getIntLittleEndian(p);
+      h64 ^= finalInt * PRIME64_1;
       h64 = Long.rotateLeft(h64, 23) * PRIME64_2 + PRIME64_3;
       p += 4;
     }
     while (p < bEnd) {
-      h64 ^= PlatformDependent.getByte(p) * PRIME64_5;
+      h64 ^= ((long)(PlatformDependent.getByte(p) & 0x00ff)) * PRIME64_5;
       h64 = Long.rotateLeft(h64, 11) * PRIME64_1;
       p++;
     }
@@ -129,34 +130,18 @@ public final class XXHash {
     return applyFinalHashComputation(h64);
   }
 
-  public static int hash32(int start, int end, DrillBuf buffer){
-    if(BOUNDS_CHECKING_ENABLED){
-      buffer.checkBytes(start, end);
-    }
-
-    long s = buffer.memoryAddress() + start;
-    long e = buffer.memoryAddress() + end;
-
-    return hash32(s, e, 0);
+  private static long applyFinalHashComputation(long h64) {
+    //IMPORTANT: using logical right shift instead of arithmetic right shift
+    h64 ^= h64 >>> 33;
+    h64 *= PRIME64_2;
+    h64 ^= h64 >>> 29;
+    h64 *= PRIME64_3;
+    h64 ^= h64 >>> 32;
+    return h64;
   }
 
-  public static int hash32(int val, int seed){
-    long h64 = seed + PRIME64_5;
-    h64 += 4; // add length (4 bytes) to hash value
-    h64 ^= val * PRIME64_1;
-    h64 = Long.rotateLeft(h64, 23) * PRIME64_2 + PRIME64_3;
-    return (int) applyFinalHashComputation(h64);
-  }
 
-  public static int hash32(float val, int seed){
-    return hash32(Float.floatToIntBits(val), seed);
-  }
-
-  public static int hash32(double val, int seed){
-    return hash32(Double.doubleToLongBits(val), seed);
-  }
-
-  public static int hash32(long val, int seed){
+  public static long hash64Internal(long val, long seed){
     long h64 = seed + PRIME64_5;
     h64 += 8; // add length (8 bytes) to hash value
     long k1 = val* PRIME64_2;
@@ -164,19 +149,39 @@ public final class XXHash {
     k1 *= PRIME64_1;
     h64 ^= k1;
     h64 = Long.rotateLeft(h64, 27) * PRIME64_1 + PRIME64_4;
-    return (int) applyFinalHashComputation(h64);
+    return applyFinalHashComputation(h64);
   }
 
-  private static int hash32(long start, long bEnd, long seed){
-    return (int) hash64(start, bEnd, seed);
+  /**
+   * @param val the input 64 bit hash value
+   * @return converted 32 bit hash value
+   */
+  private static int convert64To32(long val) {
+    return (int) (val & 0x00FFFFFFFF);
   }
 
-  private static long applyFinalHashComputation(long h64) {
-    h64 ^= h64 >> 33;
-    h64 *= PRIME64_2;
-    h64 ^= h64 >> 29;
-    h64 *= PRIME64_3;
-    h64 ^= h64 >> 32;
-    return h64;
+
+  public static long hash64(double val, long seed){
+    return hash64Internal(Double.doubleToLongBits(val), seed);
   }
+
+  public static long hash64(long start, long end, DrillBuf buffer, long seed){
+    if (BoundsChecking.BOUNDS_CHECKING_ENABLED) {
+      buffer.checkBytes((int)start, (int)end);
+    }
+
+    long s = buffer.memoryAddress() + start;
+    long e = buffer.memoryAddress() + end;
+
+    return hash64bytes(s, e, seed);
+  }
+
+  public static int hash32(double val, long seed){
+    return convert64To32(hash64(val, seed));
+  }
+
+  public static int hash32(int start, int end, DrillBuf buffer, int seed){
+    return convert64To32(hash64(start, end, buffer, seed));
+  }
+
 }

@@ -24,17 +24,18 @@ import java.util.List;
 
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.drill.exec.store.TimedRunnable;
+import org.apache.drill.exec.store.dfs.DrillPathFilter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 
-import parquet.bytes.BytesUtils;
-import parquet.hadoop.Footer;
-import parquet.hadoop.ParquetFileReader;
-import parquet.hadoop.ParquetFileWriter;
-import parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.parquet.bytes.BytesUtils;
+import org.apache.parquet.hadoop.Footer;
+import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.ParquetFileWriter;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -82,7 +83,7 @@ public class FooterGatherer {
         }
 
         // else we handle as normal file.
-        for(FileStatus inStatus : fs.listStatus(status.getPath())){
+        for(FileStatus inStatus : fs.listStatus(status.getPath(), new DrillPathFilter())){
           readers.add(new FooterReader(conf, inStatus));
         }
       }else{
@@ -151,7 +152,7 @@ public class FooterGatherer {
         footerBytes = new byte[size];
 
         readFully(file, fileLength - size - FOOTER_METADATA_SIZE, footerBytes, 0, size - origFooterRead);
-        System.arraycopy(origFooterBytes, 0, footerBytes, size - footerBytes.length, origFooterRead);
+        System.arraycopy(origFooterBytes, 0, footerBytes, size - origFooterRead, origFooterRead);
       }else{
         int start = footerBytes.length - (size + FOOTER_METADATA_SIZE);
         footerBytes = ArrayUtils.subarray(footerBytes, start, start + size);

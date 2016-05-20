@@ -16,6 +16,8 @@
  * limitations under the License.
  */
 
+import org.apache.drill.exec.planner.physical.WriterPrel;
+
 <@pp.dropOutputFile />
 <@pp.changeOutputFile name="org/apache/drill/exec/store/EventBasedRecordWriter.java" />
 <#include "/@includes/license.ftl" />
@@ -25,8 +27,11 @@ package org.apache.drill.exec.store;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 
+import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.exec.planner.physical.WriterPrel;
 import org.apache.drill.exec.record.VectorAccessible;
 import org.apache.drill.exec.record.VectorWrapper;
+import org.apache.drill.exec.vector.complex.impl.UnionReader;
 import org.apache.drill.exec.vector.complex.reader.FieldReader;
 
 import java.io.IOException;
@@ -54,6 +59,7 @@ public class EventBasedRecordWriter {
     int counter = 0;
 
     for (; counter < recordCount; counter++) {
+      recordWriter.checkForNewPartition(counter);
       recordWriter.startRecord();
       // write the current record
       for (FieldConverter converter : fieldConverters) {
@@ -73,7 +79,10 @@ public class EventBasedRecordWriter {
     try {
       int fieldId = 0;
       for (VectorWrapper w : batch) {
-        FieldReader reader = w.getValueVector().getAccessor().getReader();
+        if (w.getField().getPath().equalsIgnoreCase(WriterPrel.PARTITION_COMPARATOR_FIELD)) {
+          continue;
+        }
+        FieldReader reader = w.getValueVector().getReader();
         FieldConverter converter = getConverter(recordWriter, fieldId++, w.getField().getLastName(), reader);
         fieldConverters.add(converter);
       }
@@ -111,6 +120,8 @@ public class EventBasedRecordWriter {
 
   public static FieldConverter getConverter(RecordWriter recordWriter, int fieldId, String fieldName, FieldReader reader) {
     switch (reader.getType().getMinorType()) {
+      case UNION:
+        return recordWriter.getNewUnionConverter(fieldId, fieldName, reader);
       case MAP:
         switch (reader.getType().getMode()) {
           case REQUIRED:
@@ -121,10 +132,7 @@ public class EventBasedRecordWriter {
         }
 
       case LIST:
-        switch (reader.getType().getMode()) {
-          case REPEATED:
-            return recordWriter.getNewRepeatedListConverter(fieldId, fieldName, reader);
-        }
+        return recordWriter.getNewRepeatedListConverter(fieldId, fieldName, reader);
 
         <#list vv.types as type>
         <#list type.minor as minor>

@@ -24,9 +24,9 @@ import java.io.IOException;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.exec.vector.ValueVector;
 
-import parquet.column.ColumnDescriptor;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 
 public abstract class NullableVarLengthValuesColumn<V extends ValueVector> extends VarLengthValuesColumn<V> {
 
@@ -88,10 +88,10 @@ public abstract class NullableVarLengthValuesColumn<V extends ValueVector> exten
     }
     else {
       // re-purposing  this field here for length in BYTES to prevent repetitive multiplication/division
-      dataTypeLengthInBits = pageReader.pageDataByteArray.getInt((int) pageReader.readyToReadPosInBytes);
+      dataTypeLengthInBits = pageReader.pageData.getInt((int) pageReader.readyToReadPosInBytes);
     }
     // I think this also needs to happen if it is null for the random access
-    boolean success = setSafe(valuesReadInCurrentPass + pageReader.valuesReadyToRead, pageReader.pageDataByteArray,
+    boolean success = setSafe(valuesReadInCurrentPass + pageReader.valuesReadyToRead, pageReader.pageData,
         (int) pageReader.readyToReadPosInBytes + 4, dataTypeLengthInBits);
     if ( ! success ) {
       return true;
@@ -130,7 +130,7 @@ public abstract class NullableVarLengthValuesColumn<V extends ValueVector> exten
       }
       // re-purposing  this field here for length in BYTES to prevent repetitive multiplication/division
       dataTypeLengthInBits = variableWidthVector.getAccessor().getValueLength(valuesReadInCurrentPass);
-      boolean success = setSafe(valuesReadInCurrentPass, pageReader.pageDataByteArray,
+      boolean success = setSafe(valuesReadInCurrentPass, pageReader.pageData,
           (int) pageReader.readPosInBytes + 4, dataTypeLengthInBits);
       assert success;
     }

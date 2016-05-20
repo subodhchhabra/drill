@@ -17,17 +17,67 @@
  */
 package org.apache.drill.exec.planner;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+
+import com.google.common.base.Charsets;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+
+import org.apache.calcite.adapter.enumerable.EnumerableTableScan;
+import org.apache.calcite.prepare.RelOptTableImpl;
+import org.apache.calcite.rel.core.TableScan;
+import org.apache.calcite.util.BitSets;
+import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.common.types.TypeProtos;
+import org.apache.drill.common.types.Types;
+import org.apache.drill.exec.physical.base.FileGroupScan;
+import org.apache.drill.exec.planner.logical.DrillRel;
+import org.apache.drill.exec.planner.logical.DrillScanRel;
+import org.apache.drill.exec.planner.logical.DrillTable;
+import org.apache.drill.exec.planner.logical.DrillTranslatableTable;
+import org.apache.drill.exec.planner.logical.DynamicDrillTable;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
+import org.apache.drill.exec.store.dfs.FileSelection;
+import org.apache.drill.exec.store.dfs.FormatSelection;
+import org.apache.drill.exec.vector.NullableVarCharVector;
+import org.apache.drill.exec.vector.ValueVector;
+
+
 // partition descriptor for file system based tables
-public class FileSystemPartitionDescriptor implements PartitionDescriptor {
+public class FileSystemPartitionDescriptor extends AbstractPartitionDescriptor {
 
   static final int MAX_NESTED_SUBDIRS = 10;          // allow up to 10 nested sub-directories
 
   private final String partitionLabel;
   private final int partitionLabelLength;
+  private final Map<String, Integer> partitions = Maps.newHashMap();
+  private final TableScan scanRel;
+  private final DrillTable table;
 
-  public FileSystemPartitionDescriptor(String partitionLabel) {
-    this.partitionLabel = partitionLabel;
+  public FileSystemPartitionDescriptor(PlannerSettings settings, TableScan scanRel) {
+    Preconditions.checkArgument(scanRel instanceof DrillScanRel || scanRel instanceof EnumerableTableScan);
+    this.partitionLabel = settings.getFsPartitionColumnLabel();
     this.partitionLabelLength = partitionLabel.length();
+    this.scanRel = scanRel;
+    DrillTable unwrap;
+    unwrap = scanRel.getTable().unwrap(DrillTable.class);
+    if (unwrap == null) {
+      unwrap = scanRel.getTable().unwrap(DrillTranslatableTable.class).getDrillTable();
+    }
+
+    table = unwrap;
+
+    for(int i =0; i < 10; i++){
+      partitions.put(partitionLabel + i, i);
+    }
   }
 
   @Override
@@ -38,11 +88,158 @@ public class FileSystemPartitionDescriptor implements PartitionDescriptor {
 
   @Override
   public boolean isPartitionName(String name) {
-    return name.matches(partitionLabel +"[0-9]");
+    return partitions.containsKey(name);
+  }
+
+  @Override
+  public Integer getIdIfValid(String name) {
+    return partitions.get(name);
   }
 
   @Override
   public int getMaxHierarchyLevel() {
     return MAX_NESTED_SUBDIRS;
   }
+
+  public DrillTable getTable() {
+    return table;
+  }
+
+  @Override
+  public void populatePartitionVectors(ValueVector[] vectors, List<PartitionLocation> partitions,
+                                       BitSet partitionColumnBitSet, Map<Integer, String> fieldNameMap) {
+    int record = 0;
+    for (PartitionLocation partitionLocation: partitions) {
+      for (int partitionColumnIndex : BitSets.toIter(partitionColumnBitSet)) {
+        if (partitionLocation.getPartitionValue(partitionColumnIndex) == null) {
+          // set null if dirX does not exist for the location.
+          ((NullableVarCharVector) vectors[partitionColumnIndex]).getMutator().setNull(record);
+        } else {
+          byte[] bytes = (partitionLocation.getPartitionValue(partitionColumnIndex)).getBytes(Charsets.UTF_8);
+          ((NullableVarCharVector) vectors[partitionColumnIndex]).getMutator().setSafe(record, bytes, 0, bytes.length);
+        }
+      }
+      record++;
+    }
+
+    for (ValueVector v : vectors) {
+      if (v == null) {
+        continue;
+      }
+      v.getMutator().setValueCount(partitions.size());
+    }
+  }
+
+  @Override
+  public TypeProtos.MajorType getVectorType(SchemaPath column, PlannerSettings plannerSettings) {
+    return Types.optional(TypeProtos.MinorType.VARCHAR);
+  }
+
+  public String getName(int index) {
+    return partitionLabel + index;
+  }
+
+  private String getBaseTableLocation() {
+    final FormatSelection origSelection = (FormatSelection) table.getSelection();
+    return origSelection.getSelection().selectionRoot;
+  }
+
+  @Override
+  protected void createPartitionSublists() {
+    final Collection<String> fileLocations = getFileLocations();
+    List<PartitionLocation> locations = new LinkedList<>();
+
+    final String selectionRoot = getBaseTableLocation();
+
+    // map used to map the partition keys (dir0, dir1, ..), to the list of partitions that share the same partition keys.
+    // For example,
+    //   1990/Q1/1.parquet, 2.parquet
+    // would have <1990, Q1> as key, and value as list of partition location for 1.parquet and 2.parquet.
+    HashMap<List<String>, List<PartitionLocation>> dirToFileMap = new HashMap<>();
+
+    // Figure out the list of leaf subdirectories. For each leaf subdirectory, find the list of files (DFSFilePartitionLocation)
+    // it contains.
+    for (String file: fileLocations) {
+      DFSFilePartitionLocation dfsFilePartitionLocation = new DFSFilePartitionLocation(MAX_NESTED_SUBDIRS, selectionRoot, file);
+
+      final String[] dirs = dfsFilePartitionLocation.getDirs();
+      final List<String> dirList = Arrays.asList(dirs);
+
+      if (!dirToFileMap.containsKey(dirList)) {
+        dirToFileMap.put(dirList, new ArrayList<PartitionLocation>());
+      }
+      dirToFileMap.get(dirList).add(dfsFilePartitionLocation);
+    }
+
+    // build a list of DFSDirPartitionLocation.
+    for (final List<String> dirs : dirToFileMap.keySet()) {
+      locations.add( new DFSDirPartitionLocation((String [])dirs.toArray(), dirToFileMap.get(dirs)));
+    }
+
+    locationSuperList = Lists.partition(locations, PartitionDescriptor.PARTITION_BATCH_SIZE);
+    sublistsCreated = true;
+  }
+
+  protected Collection<String> getFileLocations() {
+    Collection<String> fileLocations = null;
+    if (scanRel instanceof DrillScanRel) {
+      // If a particular GroupScan provides files, get the list of files from there rather than
+      // DrillTable because GroupScan would have the updated version of the selection
+      final DrillScanRel drillScan = (DrillScanRel) scanRel;
+      if (drillScan.getGroupScan().hasFiles()) {
+        fileLocations = drillScan.getGroupScan().getFiles();
+      } else {
+        fileLocations = ((FormatSelection) table.getSelection()).getAsFiles();
+      }
+    } else if (scanRel instanceof EnumerableTableScan) {
+      fileLocations = ((FormatSelection) table.getSelection()).getAsFiles();
+    }
+    return fileLocations;
+  }
+
+  @Override
+  public TableScan createTableScan(List<PartitionLocation> newPartitionLocation) throws Exception {
+    List<String> newFiles = Lists.newArrayList();
+    for (final PartitionLocation location : newPartitionLocation) {
+      if (!location.isCompositePartition()) {
+        newFiles.add(location.getEntirePartitionLocation());
+      } else {
+        final Collection<SimplePartitionLocation> subPartitions = location.getPartitionLocationRecursive();
+        for (final PartitionLocation subPart : subPartitions) {
+          newFiles.add(subPart.getEntirePartitionLocation());
+        }
+      }
+    }
+
+    if (scanRel instanceof DrillScanRel) {
+      final FileSelection newFileSelection = new FileSelection(null, newFiles, getBaseTableLocation());
+      final FileGroupScan newGroupScan = ((FileGroupScan)((DrillScanRel)scanRel).getGroupScan()).clone(newFileSelection);
+      return new DrillScanRel(scanRel.getCluster(),
+                      scanRel.getTraitSet().plus(DrillRel.DRILL_LOGICAL),
+                      scanRel.getTable(),
+                      newGroupScan,
+                      scanRel.getRowType(),
+                      ((DrillScanRel) scanRel).getColumns(),
+                      true /*filter pushdown*/);
+    } else if (scanRel instanceof EnumerableTableScan) {
+      return createNewTableScanFromSelection((EnumerableTableScan)scanRel, newFiles);
+    } else {
+      throw new UnsupportedOperationException("Only DrillScanRel and EnumerableTableScan is allowed!");
+    }
+  }
+
+  private TableScan createNewTableScanFromSelection(EnumerableTableScan oldScan, List<String> newFiles) {
+    final RelOptTableImpl t = (RelOptTableImpl) oldScan.getTable();
+    final FormatSelection formatSelection = (FormatSelection) table.getSelection();
+    final FileSelection newFileSelection = new FileSelection(null, newFiles, getBaseTableLocation());
+    final FormatSelection newFormatSelection = new FormatSelection(formatSelection.getFormat(), newFileSelection);
+    final DrillTranslatableTable newTable = new DrillTranslatableTable(
+            new DynamicDrillTable(table.getPlugin(), table.getStorageEngineName(),
+            table.getUserName(),
+            newFormatSelection));
+    final RelOptTableImpl newOptTableImpl = RelOptTableImpl.create(t.getRelOptSchema(), t.getRowType(), newTable);
+
+    return EnumerableTableScan.create(oldScan.getCluster(), newOptTableImpl);
+  }
+
 }

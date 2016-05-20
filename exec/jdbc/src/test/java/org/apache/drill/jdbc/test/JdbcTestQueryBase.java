@@ -19,7 +19,6 @@ package org.apache.drill.jdbc.test;
 
 import java.nio.file.Paths;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.Statement;
@@ -28,13 +27,13 @@ import java.util.concurrent.TimeUnit;
 import org.apache.drill.common.util.TestTools;
 import org.apache.drill.jdbc.DrillResultSet;
 import org.apache.drill.jdbc.Driver;
-import org.apache.drill.jdbc.JdbcTest;
+import org.apache.drill.jdbc.JdbcTestBase;
 import org.junit.Rule;
 import org.junit.rules.TestRule;
 
 import com.google.common.base.Stopwatch;
 
-public class JdbcTestQueryBase extends JdbcTest {
+public class JdbcTestQueryBase extends JdbcTestBase {
   // Set a timeout unless we're debugging.
   @Rule
   public TestRule TIMEOUT = TestTools.getTimeoutRule(40000);
@@ -46,14 +45,14 @@ public class JdbcTestQueryBase extends JdbcTest {
 
   }
 
-  protected void testQuery(String sql) throws Exception{
+  protected static void testQuery(String sql) throws Exception{
     boolean success = false;
     try (Connection conn = connect("jdbc:drill:zk=local")) {
       for (int x = 0; x < 1; x++) {
-        Stopwatch watch = new Stopwatch().start();
+        Stopwatch watch = Stopwatch.createStarted();
         Statement s = conn.createStatement();
         ResultSet r = s.executeQuery(sql);
-        System.out.println(String.format("QueryId: %s", ((DrillResultSet) r).getQueryId()));
+        System.out.println(String.format("QueryId: %s", r.unwrap(DrillResultSet.class).getQueryId()));
         boolean first = true;
         while (r.next()) {
           ResultSetMetaData md = r.getMetaData();

@@ -19,10 +19,28 @@
 package org.apache.drill.exec.vector.complex.writer;
 
 import org.apache.drill.BaseTestQuery;
+import org.apache.drill.TestBuilder;
+import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
+
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+import static org.apache.drill.TestBuilder.listOf;
 
 public class TestComplexTypeReader extends BaseTestQuery{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestComplexTypeReader.class);
+
+  @BeforeClass
+  public static void init() throws Exception {
+    testNoResult("alter session set `exec.enable_union_type` = true");
+  }
 
   @Test
   // Repeated map (map) -> json.
@@ -218,7 +236,67 @@ public class TestComplexTypeReader extends BaseTestQuery{
   }
 
   @Test
+  @Ignore( "until flattening code creates correct ListVector (DRILL-4045)" )
   public void testNestedFlatten() throws Exception {
     test("select flatten(rl) from cp.`jsoninput/input2.json`");
+  }
+
+  @Test //DRILL-2872.
+  public void testRepeatedJson() throws Exception {
+
+    final String query="select cast(convert_to(interests, 'JSON') as varchar(0)) as interests from cp.`complex_student.json`";
+    testBuilder()
+            .sqlQuery(query)
+            .unOrdered()
+            .jsonBaselineFile("DRILL-2872-result.json")
+            .go();
+  }
+
+  @Test  // DRILL-4410
+  // ListVector allocation
+  public void test_array() throws Exception{
+
+    long numRecords = 100000;
+
+    String tempDir = BaseTestQuery.getTempDir("ComplexTypeWriter");
+    String file1 = tempDir + TestComplexTypeReader.class.getName() + "arrays1.json";
+    String file2 = tempDir + TestComplexTypeReader.class.getName() + "arrays2.json";
+    Path path1 = Paths.get(file1);
+    Path path2 = Paths.get(file2);
+
+    String arrayString = "[ \"abcdef\", \"ghijkl\", \"mnopqr\", \"stuvwx\", \"yz1234\", \"567890\" ] ";
+    Files.deleteIfExists(path1);
+    Files.deleteIfExists(path2);
+    Files.createFile(path1);
+    Files.createFile(path2);
+
+    try(PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter(file1, true)))) {
+      for (long i = 0; i < numRecords; i++) {
+        out.println("{ \"id\" : " + i + ", \"array\" : " + arrayString + "}");
+      }
+    }catch (IOException e) {
+      throw e;
+    }
+
+    try(PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter(file2, true)))) {
+      for (long i = 0; i < numRecords; i++) {
+        out.println("{ \"id\" : " + i + ", \"array\" : " + arrayString + "}");
+      }
+    }catch (IOException e) {
+      throw e;
+    }
+
+    String queryString = "select * from dfs.`" + file1 + "` `arrays1` INNER JOIN dfs.`" + file2 + "` `arrays2` ON "
+            + "(`arrays1`.id = `arrays2`.id)";
+    TestBuilder testBuilder = testBuilder().sqlQuery(queryString).unOrdered();
+    testBuilder.baselineColumns("id", "id0", "array", "array0");
+    for (long i = 0; i < numRecords; i++) {
+      testBuilder.baselineValues(i, i, listOf("abcdef", "ghijkl", "mnopqr", "stuvwx", "yz1234", "567890"),
+              listOf("abcdef", "ghijkl", "mnopqr", "stuvwx", "yz1234", "567890"));
+    }
+    testBuilder.go();
+
+    Files.deleteIfExists(path1);
+    Files.deleteIfExists(path2);
   }
 }

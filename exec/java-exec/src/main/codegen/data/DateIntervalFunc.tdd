@@ -14,6 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 {
-    {dates: ["Date", "TimeStamp", "Time", "TimeStampTZ"] },
-    {intervals: ["Interval", "IntervalDay", "IntervalYear", "Int", "BigInt"] }
+    {dates: ["Date", "TimeStamp", "Time"] },
+    {intervals: ["Interval", "IntervalDay", "IntervalYear", "Int", "BigInt"] },
+    {truncInputTypes: ["Date", "TimeStamp", "Time", "Interval", "IntervalDay", "IntervalYear"] },
+    {truncUnits : ["Second", "Minute", "Hour", "Day", "Month", "Year", "Week", "Quarter", "Decade", "Century", "Millennium" ] },
 }

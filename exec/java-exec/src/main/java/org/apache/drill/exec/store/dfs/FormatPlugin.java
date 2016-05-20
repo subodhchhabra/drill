@@ -29,6 +29,7 @@ import org.apache.drill.exec.physical.base.AbstractWriter;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.store.StoragePluginOptimizerRule;
+import org.apache.hadoop.conf.Configuration;
 
 /**
  * Similar to a storage engine but built specifically to work within a FileSystem context.
@@ -39,19 +40,23 @@ public interface FormatPlugin {
 
   public boolean supportsWrite();
 
+  /**
+   * Indicates whether this FormatPlugin supports auto-partitioning for CTAS statements
+   * @return true if auto-partitioning is supported
+   */
+  public boolean supportsAutoPartitioning();
+
   public FormatMatcher getMatcher();
 
-  public AbstractWriter getWriter(PhysicalOperator child, String location) throws IOException;
-
-  public AbstractGroupScan getGroupScan(FileSelection selection) throws IOException;
+  public AbstractWriter getWriter(PhysicalOperator child, String location, List<String> partitionColumns) throws IOException;
 
   public Set<StoragePluginOptimizerRule> getOptimizerRules();
 
-  public AbstractGroupScan getGroupScan(FileSelection selection, List<SchemaPath> columns) throws IOException;
+  public AbstractGroupScan getGroupScan(String userName, FileSelection selection, List<SchemaPath> columns) throws IOException;
 
   public FormatPluginConfig getConfig();
   public StoragePluginConfig getStorageConfig();
-  public DrillFileSystem getFileSystem();
+  public Configuration getFsConf();
   public DrillbitContext getContext();
   public String getName();
 

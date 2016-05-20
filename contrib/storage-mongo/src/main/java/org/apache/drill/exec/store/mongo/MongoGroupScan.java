@@ -18,7 +18,6 @@
 package org.apache.drill.exec.store.mongo;
 
 import java.io.IOException;
-import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -32,6 +31,11 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.annotation.JsonTypeName;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
@@ -47,33 +51,27 @@ import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.store.StoragePluginRegistry;
 import org.apache.drill.exec.store.mongo.MongoSubScan.MongoSubScanSpec;
 import org.apache.drill.exec.store.mongo.common.ChunkInfo;
+import org.bson.Document;
+import org.bson.conversions.Bson;
 import org.bson.types.MaxKey;
 import org.bson.types.MinKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import parquet.org.codehaus.jackson.annotate.JsonCreator;
-
-import com.fasterxml.jackson.annotation.JacksonInject;
-import com.fasterxml.jackson.annotation.JsonIgnore;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Stopwatch;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import com.mongodb.BasicDBObject;
-import com.mongodb.CommandResult;
-import com.mongodb.DB;
-import com.mongodb.DBCollection;
-import com.mongodb.DBCursor;
-import com.mongodb.DBObject;
 import com.mongodb.MongoClient;
-import com.mongodb.MongoClientURI;
 import com.mongodb.ReadPreference;
 import com.mongodb.ServerAddress;
+import com.mongodb.client.FindIterable;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoCursor;
+import com.mongodb.client.MongoDatabase;
 
 @JsonTypeName("mongo-scan")
 public class MongoGroupScan extends AbstractGroupScan implements
@@ -110,22 +108,25 @@ public class MongoGroupScan extends AbstractGroupScan implements
 
   private Map<String, List<ChunkInfo>> chunksInverseMapping;
 
-  private Stopwatch watch = new Stopwatch();
+  private Stopwatch watch = Stopwatch.createUnstarted();
 
   private boolean filterPushedDown = false;
 
   @JsonCreator
-  public MongoGroupScan(@JsonProperty("mongoScanSpec") MongoScanSpec scanSpec,
+  public MongoGroupScan(
+      @JsonProperty("userName") String userName,
+      @JsonProperty("mongoScanSpec") MongoScanSpec scanSpec,
       @JsonProperty("storage") MongoStoragePluginConfig storagePluginConfig,
       @JsonProperty("columns") List<SchemaPath> columns,
       @JacksonInject StoragePluginRegistry pluginRegistry) throws IOException,
       ExecutionSetupException {
-    this((MongoStoragePlugin) pluginRegistry.getPlugin(storagePluginConfig),
+    this(userName, (MongoStoragePlugin) pluginRegistry.getPlugin(storagePluginConfig),
         scanSpec, columns);
   }
 
-  public MongoGroupScan(MongoStoragePlugin storagePlugin,
+  public MongoGroupScan(String userName, MongoStoragePlugin storagePlugin,
       MongoScanSpec scanSpec, List<SchemaPath> columns) throws IOException {
+    super(userName);
     this.storagePlugin = storagePlugin;
     this.storagePluginConfig = storagePlugin.getConfig();
     this.scanSpec = scanSpec;
@@ -140,6 +141,7 @@ public class MongoGroupScan extends AbstractGroupScan implements
    *          The MongoGroupScan to clone
    */
   private MongoGroupScan(MongoGroupScan that) {
+    super(that);
     this.scanSpec = that.scanSpec;
     this.columns = that.columns;
     this.storagePlugin = that.storagePlugin;
@@ -161,130 +163,202 @@ public class MongoGroupScan extends AbstractGroupScan implements
   }
 
   private boolean isShardedCluster(MongoClient client) {
-    // need to check better way of identifying
-    List<String> databaseNames = client.getDatabaseNames();
-    return databaseNames.contains(CONFIG);
+    MongoDatabase db = client.getDatabase(scanSpec.getDbName());
+    String msg = db.runCommand(new Document("isMaster", 1)).getString("msg");
+    return msg == null ? false : msg.equals("isdbgrid");
   }
 
-  @SuppressWarnings("rawtypes")
+  @SuppressWarnings({ "rawtypes" })
   private void init() throws IOException {
-    MongoClient client = null;
-    try {
-      MongoClientURI clientURI = new MongoClientURI(
-          this.storagePluginConfig.getConnection());
-      client = new MongoClient(clientURI);
 
-      chunksMapping = Maps.newHashMap();
-      chunksInverseMapping = Maps.newLinkedHashMap();
-      if (isShardedCluster(client)) {
-        DB db = client.getDB(CONFIG);
-        db.setReadPreference(ReadPreference.nearest());
-        DBCollection chunksCollection = db.getCollectionFromString(CHUNKS);
+    List<String> h = storagePluginConfig.getHosts();
+    List<ServerAddress> addresses = Lists.newArrayList();
+    for (String host : h) {
+      addresses.add(new ServerAddress(host));
+    }
+    MongoClient client = storagePlugin.getClient();
+    chunksMapping = Maps.newHashMap();
+    chunksInverseMapping = Maps.newLinkedHashMap();
+    if (isShardedCluster(client)) {
+      MongoDatabase db = client.getDatabase(CONFIG);
+      MongoCollection<Document> chunksCollection = db.getCollection(CHUNKS);
+      Document filter = new Document();
+      filter
+          .put(
+              NS,
+              this.scanSpec.getDbName() + "."
+                  + this.scanSpec.getCollectionName());
 
-        DBObject query = new BasicDBObject(1);
-        query
-            .put(
-                NS,
-                this.scanSpec.getDbName() + "."
-                    + this.scanSpec.getCollectionName());
+      Document projection = new Document();
+      projection.put(SHARD, select);
+      projection.put(MIN, select);
+      projection.put(MAX, select);
 
-        DBObject fields = new BasicDBObject();
-        fields.put(SHARD, select);
-        fields.put(MIN, select);
-        fields.put(MAX, select);
+      FindIterable<Document> chunkCursor = chunksCollection.find(filter).projection(projection);
+      MongoCursor<Document> iterator = chunkCursor.iterator();
 
-        DBCursor chunkCursor = chunksCollection.find(query, fields);
+      MongoCollection<Document> shardsCollection = db.getCollection(SHARDS);
 
-        DBCollection shardsCollection = db.getCollectionFromString(SHARDS);
+      projection = new Document();
+      projection.put(HOST, select);
 
-        fields = new BasicDBObject();
-        fields.put(HOST, select);
-
-        while (chunkCursor.hasNext()) {
-          DBObject chunkObj = chunkCursor.next();
-          String shardName = (String) chunkObj.get(SHARD);
-          String chunkId = (String) chunkObj.get(ID);
-          query = new BasicDBObject().append(ID, shardName);
-          DBCursor hostCursor = shardsCollection.find(query, fields);
-          while (hostCursor.hasNext()) {
-            DBObject hostObj = hostCursor.next();
-            String hostEntry = (String) hostObj.get(HOST);
-            String[] tagAndHost = StringUtils.split(hostEntry, '/');
-            String[] hosts = tagAndHost.length > 1 ? StringUtils.split(
-                tagAndHost[1], ',') : StringUtils.split(tagAndHost[0], ',');
-            Set<ServerAddress> addressList = chunksMapping.get(chunkId);
-            if (addressList == null) {
-              addressList = Sets.newHashSet();
-              chunksMapping.put(chunkId, addressList);
-            }
-            for (String host : hosts) {
+      boolean hasChunks = false;
+      while (iterator.hasNext()) {
+        Document chunkObj = iterator.next();
+        String shardName = (String) chunkObj.get(SHARD);
+        String chunkId = (String) chunkObj.get(ID);
+        filter = new Document(ID, shardName);
+        FindIterable<Document> hostCursor = shardsCollection.find(filter).projection(projection);
+        MongoCursor<Document> hostIterator = hostCursor.iterator();
+        while (hostIterator.hasNext()) {
+          Document hostObj = hostIterator.next();
+          String hostEntry = (String) hostObj.get(HOST);
+          String[] tagAndHost = StringUtils.split(hostEntry, '/');
+          String[] hosts = tagAndHost.length > 1 ? StringUtils.split(
+              tagAndHost[1], ',') : StringUtils.split(tagAndHost[0], ',');
+          List<String> chunkHosts = Arrays.asList(hosts);
+          Set<ServerAddress> addressList = getPreferredHosts(storagePlugin.getClient(addresses), chunkHosts);
+          if (addressList == null) {
+            addressList = Sets.newHashSet();
+            for (String host : chunkHosts) {
               addressList.add(new ServerAddress(host));
             }
-            ServerAddress address = addressList.iterator().next();
-
-            List<ChunkInfo> chunkList = chunksInverseMapping.get(address
-                .getHost());
-            if (chunkList == null) {
-              chunkList = Lists.newArrayList();
-              chunksInverseMapping.put(address.getHost(), chunkList);
-            }
-            ChunkInfo chunkInfo = new ChunkInfo(Arrays.asList(hosts), chunkId);
-            DBObject minObj = (BasicDBObject) chunkObj.get(MIN);
-
-            Map<String, Object> minFilters = Maps.newHashMap();
-            Map minMap = minObj.toMap();
-            Set keySet = minMap.keySet();
-            for (Object keyObj : keySet) {
-              Object object = minMap.get(keyObj);
-              if (!(object instanceof MinKey)) {
-                minFilters.put(keyObj.toString(), object);
-              }
-            }
-            chunkInfo.setMinFilters(minFilters);
-
-            DBObject maxObj = (BasicDBObject) chunkObj.get(MAX);
-            Map<String, Object> maxFilters = Maps.newHashMap();
-            Map maxMap = maxObj.toMap();
-            keySet = maxMap.keySet();
-            for (Object keyObj : keySet) {
-              Object object = maxMap.get(keyObj);
-              if (!(object instanceof MaxKey)) {
-                maxFilters.put(keyObj.toString(), object);
-              }
-            }
-
-            chunkInfo.setMaxFilters(maxFilters);
-            chunkList.add(chunkInfo);
           }
-        }
-      } else {
-        String chunkName = scanSpec.getDbName() + "."
-            + scanSpec.getCollectionName();
-        List<String> hosts = clientURI.getHosts();
-        Set<ServerAddress> addressList = Sets.newHashSet();
+          chunksMapping.put(chunkId, addressList);
+          ServerAddress address = addressList.iterator().next();
+          List<ChunkInfo> chunkList = chunksInverseMapping.get(address
+              .getHost());
+          if (chunkList == null) {
+            chunkList = Lists.newArrayList();
+            chunksInverseMapping.put(address.getHost(), chunkList);
+          }
+          List<String> chunkHostsList = new ArrayList<String>();
+          for (ServerAddress serverAddr : addressList) {
+            chunkHostsList.add(serverAddr.toString());
+          }
+          ChunkInfo chunkInfo = new ChunkInfo(chunkHostsList, chunkId);
+          Document minMap = (Document) chunkObj.get(MIN);
 
-        for (String host : hosts) {
-          addressList.add(new ServerAddress(host));
-        }
-        chunksMapping.put(chunkName, addressList);
+          Map<String, Object> minFilters = Maps.newHashMap();
+          Set keySet = minMap.keySet();
+          for (Object keyObj : keySet) {
+            Object object = minMap.get(keyObj);
+            if (!(object instanceof MinKey)) {
+              minFilters.put(keyObj.toString(), object);
+            }
+          }
+          chunkInfo.setMinFilters(minFilters);
 
-        String host = hosts.get(0);
-        ServerAddress address = new ServerAddress(host);
-        ChunkInfo chunkInfo = new ChunkInfo(hosts, chunkName);
-        chunkInfo.setMinFilters(Collections.<String, Object> emptyMap());
-        chunkInfo.setMaxFilters(Collections.<String, Object> emptyMap());
-        List<ChunkInfo> chunksList = Lists.newArrayList();
-        chunksList.add(chunkInfo);
-        chunksInverseMapping.put(address.getHost(), chunksList);
+          Map<String, Object> maxFilters = Maps.newHashMap();
+          Map maxMap = (Document) chunkObj.get(MAX);
+          keySet = maxMap.keySet();
+          for (Object keyObj : keySet) {
+            Object object = maxMap.get(keyObj);
+            if (!(object instanceof MaxKey)) {
+              maxFilters.put(keyObj.toString(), object);
+            }
+          }
+
+          chunkInfo.setMaxFilters(maxFilters);
+          chunkList.add(chunkInfo);
+        }
+        hasChunks = true;
       }
-    } catch (UnknownHostException e) {
-      throw new DrillRuntimeException(e.getMessage(), e);
-    } finally {
-      if (client != null) {
-        client.close();
+      // In a sharded environment, if a collection doesn't have any chunks, it is considered as an
+      // unsharded collection and it will be stored in the primary shard of that database.
+      if (!hasChunks) {
+        handleUnshardedCollection(getPrimaryShardInfo(client));
       }
+    } else {
+      handleUnshardedCollection(storagePluginConfig.getHosts());
     }
 
+  }
+
+  private void handleUnshardedCollection(List<String> hosts) {
+    String chunkName = Joiner.on('.').join(scanSpec.getDbName(), scanSpec.getCollectionName());
+    Set<ServerAddress> addressList = Sets.newHashSet();
+
+    for (String host : hosts) {
+      addressList.add(new ServerAddress(host));
+    }
+    chunksMapping.put(chunkName, addressList);
+
+    String host = hosts.get(0);
+    ServerAddress address = new ServerAddress(host);
+    ChunkInfo chunkInfo = new ChunkInfo(hosts, chunkName);
+    chunkInfo.setMinFilters(Collections.<String, Object> emptyMap());
+    chunkInfo.setMaxFilters(Collections.<String, Object> emptyMap());
+    List<ChunkInfo> chunksList = Lists.newArrayList();
+    chunksList.add(chunkInfo);
+    chunksInverseMapping.put(address.getHost(), chunksList);
+  }
+
+  private List<String> getPrimaryShardInfo(MongoClient client) {
+    MongoDatabase database = storagePlugin.getClient().getDatabase(CONFIG);
+    //Identify the primary shard of the queried database.
+    MongoCollection<Document> collection = database.getCollection(DATABASES);
+    Bson filter = new Document(ID, this.scanSpec.getDbName());
+    Bson projection = new Document(PRIMARY, select);
+    Document document = collection.find(filter).projection(projection).first();
+    Preconditions.checkNotNull(document);
+    String shardName = document.getString(PRIMARY);
+    Preconditions.checkNotNull(shardName);
+
+    //Identify the host(s) on which this shard resides.
+    MongoCollection<Document> shardsCol = database.getCollection(SHARDS);
+    filter = new Document(ID, shardName);
+    projection = new Document(HOST, select);
+    Document hostInfo = shardsCol.find(filter).projection(projection).first();
+    Preconditions.checkNotNull(hostInfo);
+    String hostEntry = hostInfo.getString(HOST);
+    Preconditions.checkNotNull(hostEntry);
+
+    String[] tagAndHost = StringUtils.split(hostEntry, '/');
+    String[] hosts = tagAndHost.length > 1 ? StringUtils.split(tagAndHost[1],
+        ',') : StringUtils.split(tagAndHost[0], ',');
+    return Lists.newArrayList(hosts);
+  }
+
+  @SuppressWarnings("unchecked")
+  private Set<ServerAddress> getPreferredHosts(MongoClient client, List<String> hosts) {
+    Set<ServerAddress> addressList = Sets.newHashSet();
+    MongoDatabase db = client.getDatabase(scanSpec.getDbName());
+    ReadPreference readPreference = client.getReadPreference();
+    Document command = db.runCommand(new Document("isMaster", 1));
+
+    final String primaryHost = command.getString("primary");
+    final List<String> hostsList = (List<String>) command.get("hosts");
+
+    switch (readPreference.getName().toUpperCase()) {
+    case "PRIMARY":
+    case "PRIMARYPREFERRED":
+      if (primaryHost == null) {
+        return null;
+      }
+      addressList.add(new ServerAddress(primaryHost));
+      return addressList;
+    case "SECONDARY":
+    case "SECONDARYPREFERRED":
+      if (primaryHost == null || hostsList == null) {
+        return null;
+      }
+      hostsList.remove(primaryHost);
+      for (String host : hostsList) {
+        addressList.add(new ServerAddress(host));
+      }
+      return addressList;
+    case "NEAREST":
+      if (hostsList == null) {
+        return null;
+      }
+      for (String host : hostsList) {
+        addressList.add(new ServerAddress(host));
+      }
+      return addressList;
+    default:
+      return null;
+    }
   }
 
   @Override
@@ -406,7 +480,7 @@ public class MongoGroupScan extends AbstractGroupScan implements
   @Override
   public MongoSubScan getSpecificScan(int minorFragmentId)
       throws ExecutionSetupException {
-    return new MongoSubScan(storagePlugin, storagePluginConfig,
+    return new MongoSubScan(getUserName(), storagePlugin, storagePluginConfig,
         endpointFragmentMapping.get(minorFragmentId), columns);
   }
 
@@ -422,23 +496,17 @@ public class MongoGroupScan extends AbstractGroupScan implements
 
   @Override
   public ScanStats getScanStats() {
-    MongoClientURI clientURI = new MongoClientURI(
-        this.storagePluginConfig.getConnection());
-    try {
-      List<String> hosts = clientURI.getHosts();
-      List<ServerAddress> addresses = Lists.newArrayList();
-      for (String host : hosts) {
-        addresses.add(new ServerAddress(host));
+    try{
+      MongoClient client = storagePlugin.getClient();
+      MongoDatabase db = client.getDatabase(scanSpec.getDbName());
+      MongoCollection<Document> collection = db.getCollection(scanSpec.getCollectionName());
+      long numDocs = collection.count();
+      float approxDiskCost = 0;
+      if (numDocs != 0) {
+        String json = collection.find().first().toJson();
+        approxDiskCost = json.getBytes().length * numDocs;
       }
-      MongoClient client = MongoCnxnManager.getClient(addresses,
-          clientURI.getOptions());
-      DB db = client.getDB(scanSpec.getDbName());
-      db.setReadPreference(ReadPreference.nearest());
-      DBCollection collection = db.getCollectionFromString(scanSpec
-          .getCollectionName());
-      CommandResult stats = collection.getStats();
-      return new ScanStats(GroupScanProperty.EXACT_ROW_COUNT,
-          stats.getLong(COUNT), 1, (float) stats.getDouble(SIZE));
+      return new ScanStats(GroupScanProperty.EXACT_ROW_COUNT, numDocs, 1, approxDiskCost);
     } catch (Exception e) {
       throw new DrillRuntimeException(e.getMessage(), e);
     }
@@ -515,6 +583,7 @@ public class MongoGroupScan extends AbstractGroupScan implements
 
   @VisibleForTesting
   MongoGroupScan() {
+    super((String)null);
   }
 
   @JsonIgnore

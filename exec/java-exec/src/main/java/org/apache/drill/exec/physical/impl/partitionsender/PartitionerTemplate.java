@@ -28,18 +28,17 @@ import org.apache.drill.exec.compile.sig.RuntimeOverridden;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.TypeHelper;
 import org.apache.drill.exec.memory.BufferAllocator;
+import org.apache.drill.exec.ops.AccountingDataTunnel;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.ops.OperatorStats;
 import org.apache.drill.exec.physical.MinorFragmentEndpoint;
 import org.apache.drill.exec.physical.config.HashPartitionSender;
-import org.apache.drill.exec.physical.impl.SendingAccountor;
 import org.apache.drill.exec.physical.impl.partitionsender.PartitionSenderRootExec.Metric;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
 import org.apache.drill.exec.record.BatchSchema;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
 import org.apache.drill.exec.record.FragmentWritableBatch;
-import org.apache.drill.exec.record.MaterializedField;
 import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorAccessible;
@@ -48,7 +47,6 @@ import org.apache.drill.exec.record.VectorWrapper;
 import org.apache.drill.exec.record.WritableBatch;
 import org.apache.drill.exec.record.selection.SelectionVector2;
 import org.apache.drill.exec.record.selection.SelectionVector4;
-import org.apache.drill.exec.rpc.data.DataTunnel;
 import org.apache.drill.exec.vector.ValueVector;
 
 import com.google.common.collect.Lists;
@@ -62,6 +60,9 @@ public abstract class PartitionerTemplate implements Partitioner {
   private SelectionVector2 sv2;
   private SelectionVector4 sv4;
   private RecordBatch incoming;
+  private OperatorStats stats;
+  private int start;
+  private int end;
   private List<OutgoingRecordBatch> outgoingBatches = Lists.newArrayList();
 
   private int outgoingRecordBatchSize = DEFAULT_RECORD_BATCH_SIZE;
@@ -75,15 +76,25 @@ public abstract class PartitionerTemplate implements Partitioner {
   }
 
   @Override
+  public PartitionOutgoingBatch getOutgoingBatch(int index) {
+    if ( index >= start && index < end) {
+      return outgoingBatches.get(index - start);
+    }
+    return null;
+  }
+
+  @Override
   public final void setup(FragmentContext context,
                           RecordBatch incoming,
                           HashPartitionSender popConfig,
                           OperatorStats stats,
-                          SendingAccountor sendingAccountor,
                           OperatorContext oContext,
-                          StatusHandler statusHandler) throws SchemaChangeException {
+                          int start, int end) throws SchemaChangeException {
 
     this.incoming = incoming;
+    this.stats = stats;
+    this.start = start;
+    this.end = end;
     doSetup(context, incoming, null);
 
     // Half the outgoing record batch size if the number of senders exceeds 1000 to reduce the total amount of memory
@@ -93,12 +104,15 @@ public abstract class PartitionerTemplate implements Partitioner {
       outgoingRecordBatchSize = (DEFAULT_RECORD_BATCH_SIZE + 1)/2 - 1;
     }
 
+    int fieldId = 0;
     for (MinorFragmentEndpoint destination : popConfig.getDestinations()) {
-      FragmentHandle opposite = context.getHandle().toBuilder()
-          .setMajorFragmentId(popConfig.getOppositeMajorFragmentId())
-          .setMinorFragmentId(destination.getId()).build();
-      outgoingBatches.add(new OutgoingRecordBatch(stats, sendingAccountor, popConfig,
-          context.getDataTunnel(destination.getEndpoint()), context, oContext.getAllocator(), destination.getId(), statusHandler));
+      // create outgoingBatches only for subset of Destination Points
+      if ( fieldId >= start && fieldId < end ) {
+        logger.debug("start: {}, count: {}, fieldId: {}", start, end, fieldId);
+        outgoingBatches.add(new OutgoingRecordBatch(stats, popConfig,
+          context.getDataTunnel(destination.getEndpoint()), context, oContext.getAllocator(), destination.getId()));
+      }
+      fieldId++;
     }
 
     for (OutgoingRecordBatch outgoingRecordBatch : outgoingBatches) {
@@ -121,6 +135,11 @@ public abstract class PartitionerTemplate implements Partitioner {
       default:
         throw new UnsupportedOperationException("Unknown selection vector mode: " + svMode.toString());
     }
+  }
+
+  @Override
+  public OperatorStats getStats() {
+    return stats;
   }
 
   /**
@@ -154,29 +173,39 @@ public abstract class PartitionerTemplate implements Partitioner {
     switch(svMode) {
       case NONE:
         for (int recordId = 0; recordId < incoming.getRecordCount(); ++recordId) {
-          OutgoingRecordBatch outgoingBatch = outgoingBatches.get(doEval(recordId));
-          outgoingBatch.copy(recordId);
+          doCopy(recordId);
         }
         break;
 
       case TWO_BYTE:
         for (int recordId = 0; recordId < incoming.getRecordCount(); ++recordId) {
           int svIndex = sv2.getIndex(recordId);
-          OutgoingRecordBatch outgoingBatch = outgoingBatches.get(doEval(svIndex));
-          outgoingBatch.copy(svIndex);
+          doCopy(svIndex);
         }
         break;
 
       case FOUR_BYTE:
         for (int recordId = 0; recordId < incoming.getRecordCount(); ++recordId) {
           int svIndex = sv4.get(recordId);
-          OutgoingRecordBatch outgoingBatch = outgoingBatches.get(doEval(svIndex));
-          outgoingBatch.copy(svIndex);
+          doCopy(svIndex);
         }
         break;
 
       default:
         throw new UnsupportedOperationException("Unknown selection vector mode: " + svMode.toString());
+    }
+  }
+
+  /**
+   * Helper method to copy data based on partition
+   * @param svIndex
+   * @throws IOException
+   */
+  private void doCopy(int svIndex) throws IOException {
+    int index = doEval(svIndex);
+    if ( index >= start && index < end) {
+      OutgoingRecordBatch outgoingBatch = outgoingBatches.get(index - start);
+      outgoingBatch.copy(svIndex);
     }
   }
 
@@ -187,48 +216,32 @@ public abstract class PartitionerTemplate implements Partitioner {
     }
   }
 
-  private String composeTooBigMsg(int recordId, RecordBatch incoming) {
-    String msg = String.format("Record " + recordId + " is too big to fit into the allocated memory of ValueVector.");
-    msg += " Schema: ";
-    for (int i = 0; i < incoming.getSchema().getFieldCount(); i++) {
-      MaterializedField f = incoming.getSchema().getColumn(i);
-      msg += f.getPath().getRootSegment().getPath() + " ";
-    }
-    return msg;
-  }
-
   public abstract void doSetup(@Named("context") FragmentContext context, @Named("incoming") RecordBatch incoming, @Named("outgoing") OutgoingRecordBatch[] outgoing) throws SchemaChangeException;
   public abstract int doEval(@Named("inIndex") int inIndex);
 
   public class OutgoingRecordBatch implements PartitionOutgoingBatch, VectorAccessible {
 
-    private final DataTunnel tunnel;
+    private final AccountingDataTunnel tunnel;
     private final HashPartitionSender operator;
     private final FragmentContext context;
     private final BufferAllocator allocator;
     private final VectorContainer vectorContainer = new VectorContainer();
-    private final SendingAccountor sendCount;
     private final int oppositeMinorFragmentId;
-    private final StatusHandler statusHandler;
     private final OperatorStats stats;
 
     private boolean isLast = false;
-    private volatile boolean terminated = false;
     private boolean dropAll = false;
     private int recordCount;
     private int totalRecords;
 
-    public OutgoingRecordBatch(OperatorStats stats, SendingAccountor sendCount, HashPartitionSender operator, DataTunnel tunnel,
-                               FragmentContext context, BufferAllocator allocator, int oppositeMinorFragmentId,
-                               StatusHandler statusHandler) {
+    public OutgoingRecordBatch(OperatorStats stats, HashPartitionSender operator, AccountingDataTunnel tunnel,
+                               FragmentContext context, BufferAllocator allocator, int oppositeMinorFragmentId) {
       this.context = context;
       this.allocator = allocator;
       this.operator = operator;
       this.tunnel = tunnel;
-      this.sendCount = sendCount;
       this.stats = stats;
       this.oppositeMinorFragmentId = oppositeMinorFragmentId;
-      this.statusHandler = statusHandler;
     }
 
     protected void copy(int inIndex) throws IOException {
@@ -242,7 +255,8 @@ public abstract class PartitionerTemplate implements Partitioner {
 
     @Override
     public void terminate() {
-      terminated = true;
+      // receiver already terminated, don't send anything to it from now on
+      dropAll = true;
     }
 
     @RuntimeOverridden
@@ -253,15 +267,26 @@ public abstract class PartitionerTemplate implements Partitioner {
 
     public void flush(boolean schemaChanged) throws IOException {
       if (dropAll) {
-        vectorContainer.zeroVectors();
+        // If we are in dropAll mode, we still want to copy the data, because we can't stop copying a single outgoing
+        // batch with out stopping all outgoing batches. Other option is check for status of dropAll before copying
+        // every single record in copy method which has the overhead for every record all the time. Resetting the output
+        // count, reusing the same buffers and copying has overhead only for outgoing batches whose receiver has
+        // terminated.
+
+        // Reset the count to 0 and use existing buffers for exhausting input where receiver of this batch is terminated
+        recordCount = 0;
         return;
       }
       final FragmentHandle handle = context.getHandle();
 
       // We need to send the last batch when
       //   1. we are actually done processing the incoming RecordBatches and no more input available
-      //   2. receiver wants to terminate (possible in case of queries involving limit clause)
-      final boolean isLastBatch = isLast || terminated;
+      //   2. receiver wants to terminate (possible in case of queries involving limit clause). Even when receiver wants
+      //      to terminate we need to send at least one batch with "isLastBatch" set to true, so that receiver knows
+      //      sender has acknowledged the terminate request. After sending the last batch, all further batches are
+      //      dropped.
+      //   3. Partitioner thread is interrupted due to cancellation of fragment.
+      final boolean isLastBatch = isLast || Thread.currentThread().isInterrupted();
 
       // if the batch is not the last batch and the current recordCount is zero, then no need to send any RecordBatches
       if (!isLastBatch && recordCount == 0) {
@@ -285,11 +310,10 @@ public abstract class PartitionerTemplate implements Partitioner {
       updateStats(writableBatch);
       stats.startWait();
       try {
-        tunnel.sendRecordBatch(statusHandler, writableBatch);
+        tunnel.sendRecordBatch(writableBatch);
       } finally {
         stats.stopWait();
       }
-      sendCount.increment();
 
       // If the current batch is the last batch, then set a flag to ignore any requests to flush the data
       // This is possible when the receiver is terminated, but we still get data from input operator
@@ -305,10 +329,6 @@ public abstract class PartitionerTemplate implements Partitioner {
         recordCount = 0;
         vectorContainer.zeroVectors();
         allocateOutgoingRecordBatch();
-      }
-
-      if (!statusHandler.isOk()) {
-        throw new IOException(statusHandler.getException());
       }
     }
 
@@ -379,6 +399,16 @@ public abstract class PartitionerTemplate implements Partitioner {
       return vectorContainer.iterator();
     }
 
+    @Override
+    public SelectionVector2 getSelectionVector2() {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public SelectionVector4 getSelectionVector4() {
+      throw new UnsupportedOperationException();
+    }
+
     public WritableBatch getWritableBatch() {
       return WritableBatch.getBatchNoHVWrap(recordCount, this, false);
     }
@@ -386,5 +416,6 @@ public abstract class PartitionerTemplate implements Partitioner {
     public void clear(){
       vectorContainer.clear();
     }
+
   }
 }

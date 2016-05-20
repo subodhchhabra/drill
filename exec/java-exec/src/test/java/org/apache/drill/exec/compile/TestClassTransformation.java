@@ -26,6 +26,7 @@ import org.apache.drill.exec.compile.sig.MappingSet;
 import org.apache.drill.exec.exception.ClassTransformationException;
 import org.apache.drill.exec.expr.ClassGenerator;
 import org.apache.drill.exec.expr.CodeGenerator;
+import org.apache.drill.exec.rpc.user.UserSession;
 import org.apache.drill.exec.server.options.OptionValue;
 import org.apache.drill.exec.server.options.OptionValue.OptionType;
 import org.apache.drill.exec.server.options.SessionOptionManager;
@@ -43,7 +44,10 @@ public class TestClassTransformation extends BaseTestQuery {
 
   @BeforeClass
   public static void beforeTestClassTransformation() throws Exception {
-    sessionOptions = new SessionOptionManager(getDrillbitContext().getOptionManager());
+    final UserSession userSession = UserSession.Builder.newBuilder()
+      .withOptionManager(getDrillbitContext().getOptionManager())
+      .build();
+    sessionOptions = (SessionOptionManager) userSession.getOptions();
   }
 
   @Test
@@ -104,7 +108,7 @@ public class TestClassTransformation extends BaseTestQuery {
   private void compilationInnerClass(QueryClassLoader loader) throws Exception{
     CodeGenerator<ExampleInner> cg = newCodeGenerator(ExampleInner.class, ExampleTemplateWithInner.class);
 
-    ClassTransformer ct = new ClassTransformer();
+    ClassTransformer ct = new ClassTransformer(sessionOptions);
     Class<? extends ExampleInner> c = (Class<? extends ExampleInner>) ct.getImplementationClass(loader, cg.getDefinition(), cg.generateAndGet(), cg.getMaterializedClassName());
     ExampleInner t = (ExampleInner) c.newInstance();
     t.doOutside();

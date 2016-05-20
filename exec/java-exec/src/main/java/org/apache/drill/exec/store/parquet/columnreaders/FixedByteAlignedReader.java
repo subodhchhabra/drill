@@ -17,34 +17,34 @@
  */
 package org.apache.drill.exec.store.parquet.columnreaders;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.DrillBuf;
-
 import java.math.BigDecimal;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.exec.expr.holders.Decimal28SparseHolder;
 import org.apache.drill.exec.expr.holders.Decimal38SparseHolder;
 import org.apache.drill.exec.store.ParquetOutputRecordWriter;
+import org.apache.drill.exec.store.parquet.ParquetReaderUtility;
 import org.apache.drill.exec.util.DecimalUtility;
 import org.apache.drill.exec.vector.DateVector;
 import org.apache.drill.exec.vector.Decimal28SparseVector;
 import org.apache.drill.exec.vector.Decimal38SparseVector;
+import org.apache.drill.exec.vector.IntervalVector;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.VariableWidthVector;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 import org.joda.time.DateTimeUtils;
 
-import parquet.column.ColumnDescriptor;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
+import io.netty.buffer.DrillBuf;
 
-class FixedByteAlignedReader extends ColumnReader {
+class FixedByteAlignedReader<V extends ValueVector> extends ColumnReader<V> {
 
   protected DrillBuf bytebuf;
 
 
   FixedByteAlignedReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
-                         boolean fixedLength, ValueVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+                         boolean fixedLength, V v, SchemaElement schemaElement) throws ExecutionSetupException {
     super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
   }
 
@@ -52,24 +52,23 @@ class FixedByteAlignedReader extends ColumnReader {
   @Override
   protected void readField(long recordsToReadInThisPass) {
 
-    recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+    recordsReadInThisIteration = Math.min(pageReader.currentPageCount
         - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
     readStartInBytes = pageReader.readPosInBytes;
     readLengthInBits = recordsReadInThisIteration * dataTypeLengthInBits;
     readLength = (int) Math.ceil(readLengthInBits / 8.0);
 
-    bytebuf = pageReader.pageDataByteArray;
+    bytebuf = pageReader.pageData;
     // vectorData is assigned by the superclass read loop method
     writeData();
   }
 
   protected void writeData() {
-    vectorData.writeBytes(bytebuf,
-        (int) readStartInBytes, (int) readLength);
+    vectorData.writeBytes(bytebuf, (int) readStartInBytes, (int) readLength);
   }
 
-  public static class FixedBinaryReader extends FixedByteAlignedReader {
+  public static class FixedBinaryReader extends FixedByteAlignedReader<VariableWidthVector> {
     // TODO - replace this with fixed binary type in drill
     VariableWidthVector castedVector;
 
@@ -87,18 +86,18 @@ class FixedByteAlignedReader extends ColumnReader {
       // now we need to write the lengths of each value
       int byteLength = dataTypeLengthInBits / 8;
       for (int i = 0; i < recordsToReadInThisPass; i++) {
-        castedVector.getMutator().setValueLengthSafe(i, byteLength);
+        castedVector.getMutator().setValueLengthSafe(valuesReadInCurrentPass + i, byteLength);
       }
     }
 
   }
 
-  public static abstract class ConvertedReader extends FixedByteAlignedReader {
+  public static abstract class ConvertedReader<V extends ValueVector> extends FixedByteAlignedReader<V> {
 
     protected int dataTypeLengthInBytes;
 
     ConvertedReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
-                           boolean fixedLength, ValueVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+                           boolean fixedLength, V v, SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
     }
 
@@ -118,69 +117,77 @@ class FixedByteAlignedReader extends ColumnReader {
     abstract void addNext(int start, int index);
   }
 
-  public static class DateReader extends ConvertedReader {
-
-    DateVector dateVector;
+  public static class DateReader extends ConvertedReader<DateVector> {
 
     DateReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
-                    boolean fixedLength, ValueVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+                    boolean fixedLength, DateVector v, SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      dateVector = (DateVector) v;
     }
 
     @Override
     void addNext(int start, int index) {
-//      dateVector.getMutator().set(index, DateTimeUtils.fromJulianDay(
-//          NullableFixedByteAlignedReaders.NullableDateReader.readIntLittleEndian(bytebuf, start)
-      dateVector.getMutator().set(index, DateTimeUtils.fromJulianDay(readIntLittleEndian(bytebuf, start)
-              - ParquetOutputRecordWriter.JULIAN_DAY_EPOC - 0.5));
+      int intValue;
+      if (usingDictionary) {
+        intValue =  pageReader.dictionaryValueReader.readInteger();
+      } else {
+        intValue = readIntLittleEndian(bytebuf, start);
+      }
+
+      valueVec.getMutator().set(index, DateTimeUtils.fromJulianDay(intValue - ParquetOutputRecordWriter.JULIAN_DAY_EPOC - 0.5));
     }
 
-    // copied out of parquet library, didn't want to deal with the uneeded throws statement they had declared
-    public static int readIntLittleEndian(ByteBuf in, int offset) {
-      int ch4 = in.getByte(offset) & 0xff;
-      int ch3 = in.getByte(offset + 1) & 0xff;
-      int ch2 = in.getByte(offset + 2) & 0xff;
-      int ch1 = in.getByte(offset + 3) & 0xff;
-      return ((ch1 << 24) + (ch2 << 16) + (ch3 << 8) + (ch4 << 0));
-    }
   }
 
-  public static class Decimal28Reader extends ConvertedReader {
-
-    Decimal28SparseVector decimal28Vector;
+  public static class Decimal28Reader extends ConvertedReader<Decimal28SparseVector> {
 
     Decimal28Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
-                    boolean fixedLength, ValueVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+                    boolean fixedLength, Decimal28SparseVector v, SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      decimal28Vector = (Decimal28SparseVector) v;
     }
 
     @Override
     void addNext(int start, int index) {
       int width = Decimal28SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, dataTypeLengthInBytes, schemaElement.getScale());
-      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal28Vector.getData(), index * width, schemaElement.getScale(),
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, dataTypeLengthInBytes,
+          schemaElement.getScale());
+      DecimalUtility.getSparseFromBigDecimal(intermediate, valueVec.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal28SparseHolder.nDecimalDigits);
     }
   }
 
-  public static class Decimal38Reader extends ConvertedReader {
-
-    Decimal38SparseVector decimal38Vector;
+  public static class Decimal38Reader extends ConvertedReader<Decimal38SparseVector> {
 
     Decimal38Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
-                    boolean fixedLength, ValueVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+                    boolean fixedLength, Decimal38SparseVector v, SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      decimal38Vector = (Decimal38SparseVector) v;
     }
 
     @Override
     void addNext(int start, int index) {
       int width = Decimal38SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, dataTypeLengthInBytes, schemaElement.getScale());
-      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal38Vector.getData(), index * width, schemaElement.getScale(),
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, dataTypeLengthInBytes,
+          schemaElement.getScale());
+      DecimalUtility.getSparseFromBigDecimal(intermediate, valueVec.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal38SparseHolder.nDecimalDigits);
+    }
+  }
+
+  public static class IntervalReader extends ConvertedReader<IntervalVector> {
+    IntervalReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor, ColumnChunkMetaData columnChunkMetaData,
+                   boolean fixedLength, IntervalVector v, SchemaElement schemaElement) throws ExecutionSetupException {
+      super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
+    }
+
+    @Override
+    void addNext(int start, int index) {
+      if (usingDictionary) {
+        byte[] input = pageReader.dictionaryValueReader.readBytes().getBytes();
+        valueVec.getMutator().setSafe(index * 12,
+            ParquetReaderUtility.getIntFromLEBytes(input, 0),
+            ParquetReaderUtility.getIntFromLEBytes(input, 4),
+            ParquetReaderUtility.getIntFromLEBytes(input, 8));
+      }
+      valueVec.getMutator().setSafe(index, bytebuf.getInt(start), bytebuf.getInt(start + 4), bytebuf.getInt(start + 8));
     }
   }
 }

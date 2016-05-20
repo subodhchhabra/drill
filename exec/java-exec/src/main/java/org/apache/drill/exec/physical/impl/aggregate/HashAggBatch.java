@@ -20,8 +20,10 @@ package org.apache.drill.exec.physical.impl.aggregate;
 import java.io.IOException;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.expression.ErrorCollector;
 import org.apache.drill.common.expression.ErrorCollectorImpl;
+import org.apache.drill.common.expression.IfExpression;
 import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.logical.data.NamedExpression;
 import org.apache.drill.exec.ExecConstants;
@@ -30,7 +32,6 @@ import org.apache.drill.exec.compile.sig.MappingSet;
 import org.apache.drill.exec.exception.ClassTransformationException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.ClassGenerator;
-import org.apache.drill.exec.expr.ClassGenerator.BlockType;
 import org.apache.drill.exec.expr.ClassGenerator.HoldingContainer;
 import org.apache.drill.exec.expr.CodeGenerator;
 import org.apache.drill.exec.expr.ExpressionTreeMaterializer;
@@ -93,11 +94,20 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
 
   @Override
   public void buildSchema() throws SchemaChangeException {
-    if (next(incoming) == IterOutcome.NONE) {
-      state = BatchState.DONE;
-      container.buildSchema(SelectionVectorMode.NONE);
-      return;
+    IterOutcome outcome = next(incoming);
+    switch (outcome) {
+      case NONE:
+        state = BatchState.DONE;
+        container.buildSchema(SelectionVectorMode.NONE);
+        return;
+      case OUT_OF_MEMORY:
+        state = BatchState.OUT_OF_MEMORY;
+        return;
+      case STOP:
+        state = BatchState.STOP;
+        return;
     }
+
     if (!createAggregator()) {
       state = BatchState.DONE;
     }
@@ -115,33 +125,29 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
 
     if (aggregator.buildComplete() && !aggregator.allFlushed()) {
       // aggregation is complete and not all records have been output yet
-      IterOutcome outcome = aggregator.outputCurrentBatch();
-      return outcome;
+      return aggregator.outputCurrentBatch();
     }
 
     logger.debug("Starting aggregator doWork; incoming record count = {} ", incoming.getRecordCount());
 
-    while (true) {
-      AggOutcome out = aggregator.doWork();
-      logger.debug("Aggregator response {}, records {}", out, aggregator.getOutputCount());
-      switch (out) {
-      case CLEANUP_AND_RETURN:
-        container.zeroVectors();
-        aggregator.cleanup();
-        state = BatchState.DONE;
-        // fall through
-      case RETURN_OUTCOME:
-        IterOutcome outcome = aggregator.getOutcome();
-        return aggregator.getOutcome();
-      case UPDATE_AGGREGATOR:
-        aggregator = null;
-        if (!createAggregator()) {
-          return IterOutcome.STOP;
-        }
-        continue;
-      default:
-        throw new IllegalStateException(String.format("Unknown state %s.", out));
-      }
+    AggOutcome out = aggregator.doWork();
+    logger.debug("Aggregator response {}, records {}", out, aggregator.getOutputCount());
+    switch (out) {
+    case CLEANUP_AND_RETURN:
+      container.zeroVectors();
+      aggregator.cleanup();
+      state = BatchState.DONE;
+      // fall through
+    case RETURN_OUTCOME:
+      return aggregator.getOutcome();
+    case UPDATE_AGGREGATOR:
+      context.fail(UserException.unsupportedError()
+        .message("Hash aggregate does not support schema changes").build(logger));
+      close();
+      killIncoming(false);
+      return IterOutcome.STOP;
+    default:
+      throw new IllegalStateException(String.format("Unknown state %s.", out));
     }
   }
 
@@ -176,8 +182,8 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
 
     container.clear();
 
-    int numGroupByExprs = (popConfig.getGroupByExprs() != null) ? popConfig.getGroupByExprs().length : 0;
-    int numAggrExprs = (popConfig.getAggrExprs() != null) ? popConfig.getAggrExprs().length : 0;
+    int numGroupByExprs = (popConfig.getGroupByExprs() != null) ? popConfig.getGroupByExprs().size() : 0;
+    int numAggrExprs = (popConfig.getAggrExprs() != null) ? popConfig.getAggrExprs().size() : 0;
     aggrExprs = new LogicalExpression[numAggrExprs];
     groupByOutFieldIds = new TypedFieldId[numGroupByExprs];
     aggrOutFieldIds = new TypedFieldId[numAggrExprs];
@@ -187,14 +193,14 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
     int i;
 
     for (i = 0; i < numGroupByExprs; i++) {
-      NamedExpression ne = popConfig.getGroupByExprs()[i];
+      NamedExpression ne = popConfig.getGroupByExprs().get(i);
       final LogicalExpression expr =
           ExpressionTreeMaterializer.materialize(ne.getExpr(), incoming, collector, context.getFunctionRegistry());
       if (expr == null) {
         continue;
       }
 
-      final MaterializedField outputField = MaterializedField.create(ne.getRef(), expr.getMajorType());
+      final MaterializedField outputField = MaterializedField.create(ne.getRef().getAsNamePart().getName(), expr.getMajorType());
       ValueVector vv = TypeHelper.getNewVector(outputField, oContext.getAllocator());
 
       // add this group-by vector to the output container
@@ -202,9 +208,13 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
     }
 
     for (i = 0; i < numAggrExprs; i++) {
-      NamedExpression ne = popConfig.getAggrExprs()[i];
+      NamedExpression ne = popConfig.getAggrExprs().get(i);
       final LogicalExpression expr =
           ExpressionTreeMaterializer.materialize(ne.getExpr(), incoming, collector, context.getFunctionRegistry());
+
+      if (expr instanceof IfExpression) {
+        throw UserException.unsupportedError(new UnsupportedOperationException("Union type not supported in aggregate functions")).build(logger);
+      }
 
       if (collector.hasErrors()) {
         throw new SchemaChangeException("Failure while materializing expression. " + collector.toErrorString());
@@ -214,7 +224,7 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
         continue;
       }
 
-      final MaterializedField outputField = MaterializedField.create(ne.getRef(), expr.getMajorType());
+      final MaterializedField outputField = MaterializedField.create(ne.getRef().getAsNamePart().getName(), expr.getMajorType());
       ValueVector vv = TypeHelper.getNewVector(outputField, oContext.getAllocator());
       aggrOutFieldIds[i] = container.add(vv);
 
@@ -229,7 +239,8 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
     HashAggregator agg = context.getImplementationClass(top);
 
     HashTableConfig htConfig =
-        new HashTableConfig(context.getOptions().getOption(ExecConstants.MIN_HASH_TABLE_SIZE_KEY).num_val.intValue(),
+        // TODO - fix the validator on this option
+        new HashTableConfig((int)context.getOptions().getOption(ExecConstants.MIN_HASH_TABLE_SIZE),
             HashTable.DEFAULT_LOAD_FACTOR, popConfig.getGroupByExprs(), null /* no probe exprs */);
 
     agg.setup(popConfig, htConfig, context, this.stats,
@@ -246,7 +257,7 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
     cg.setMappingSet(UpdateAggrValuesMapping);
 
     for (LogicalExpression aggr : aggrExprs) {
-      HoldingContainer hc = cg.addExpr(aggr);
+      HoldingContainer hc = cg.addExpr(aggr, true);
     }
   }
 
@@ -274,12 +285,11 @@ public class HashAggBatch extends AbstractRecordBatch<HashAggregate> {
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     if (aggregator != null) {
       aggregator.cleanup();
     }
-    super.cleanup();
-    incoming.cleanup();
+    super.close();
   }
 
   @Override

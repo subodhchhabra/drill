@@ -28,6 +28,7 @@ import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
+import org.junit.rules.ExpectedException;
 import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
 import org.junit.rules.TestWatcher;
@@ -38,9 +39,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 public class DrillTest {
-  static final Logger logger = org.slf4j.LoggerFactory.getLogger(DrillTest.class);
+//  private static final Logger logger = org.slf4j.LoggerFactory.getLogger(DrillTest.class);
 
-  protected static final ObjectMapper objectMapper = new ObjectMapper();
+  protected static final ObjectMapper objectMapper;
+  static {
+    System.setProperty("line.separator", "\n");
+    objectMapper = new ObjectMapper();
+  }
 
   static final SystemManager manager = new SystemManager();
 
@@ -52,6 +57,15 @@ public class DrillTest {
 
   @Rule public final TestRule TIMEOUT = TestTools.getTimeoutRule(50000);
   @Rule public final TestLogReporter logOutcome = LOG_OUTCOME;
+
+  @Rule public final TestRule REPEAT_RULE = TestTools.getRepeatRule(false);
+
+  /**
+   * Rule for tests that verify {@link org.apache.drill.common.exceptions.UserException} type and message. See
+   * {@link UserExceptionMatcher} and e.g. {@link org.apache.drill.exec.server.TestOptions#checkValidationException}.
+   * Tests that do not use this rule are not affected.
+   */
+  @Rule public final ExpectedException thrownException = ExpectedException.none();
 
   @Rule public TestName TEST_NAME = new TestName();
 

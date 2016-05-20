@@ -32,6 +32,7 @@
     <li><a href="#query-physical" role="tab" data-toggle="tab">Physical Plan</a></li>
     <li><a href="#query-visual" role="tab" data-toggle="tab">Visualized Plan</a></li>
     <li><a href="#query-edit" role="tab" data-toggle="tab">Edit Query</a></li>
+    <#if model.hasError() ><li><a href="#query-error" role="tab" data-toggle="tab">Error</a></li></#if>
   </ul>
   <div id="query-content" class="tab-content">
     <div id="query-query" class="tab-pane">
@@ -70,11 +71,41 @@
         </div>
         <button type="submit" class="btn btn-default">Re-run query</button>
       </form>
-      <form action="/profiles/cancel/${model.id}" method="GET">
+      <form action="/profiles/cancel/${model.queryId}" method="GET">
         <button type="link" class="btn btn-default">Cancel query</button>
       </form>
     </div>
+    <#if model.hasError() >
+    <div id="query-error" class="tab-pane">
+      <p>
+      <pre>
+      ${model.getProfile().error?trim}
+      </pre>
+      </p>
+      <p>Failure node: ${model.getProfile().errorNode}</p>
+      <p>Error ID: ${model.getProfile().errorId}</p>
+      
+        <h3 class="panel-title">
+          <a data-toggle="collapse" href="#error-verbose">
+            Verbose Error Message...
+          </a>
+        </h3>
+      <div id="error-verbose" class="panel-collapse collapse">
+        <div class="panel-body">
+        <p></p><p></p>
+          <pre>
+            ${model.getProfile().verboseError?trim}
+          </pre>
+        </div>
+    </div>
+    </#if>
   </div>
+
+  <div class="page-header"></div>
+  <h3>Query Profile</h3>
+  <p>STATE: ${model.getProfile().getState().name()}</p>
+  <p>FOREMAN: ${model.getProfile().getForeman().getAddress()}</p>
+  <p>TOTAL FRAGMENTS: ${model.getProfile().getTotalFragments()}</p>
 
   <div class="page-header"></div>
   <h3>Fragment Profiles</h3>
@@ -144,6 +175,20 @@
       <div id="${op.getId()}" class="panel-collapse collapse">
         <div class="panel-body">
           ${op.getContent()}
+        </div>
+        <div class="panel panel-info">
+          <div class="panel-heading">
+            <h4 class="panel-title">
+              <a data-toggle="collapse" href="#${op.getId()}-metrics">
+                Operator Metrics
+              </a>
+            </h4>
+          </div>
+          <div id="${op.getId()}-metrics" class="panel-collapse collapse">
+            <div class="panel-body">
+              ${op.getMetricsTable()}
+            </div>
+          </div>
         </div>
       </div>
     </div>

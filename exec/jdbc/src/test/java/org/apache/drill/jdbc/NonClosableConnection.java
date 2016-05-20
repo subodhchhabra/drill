@@ -17,6 +17,8 @@
  */
 package org.apache.drill.jdbc;
 
+import com.google.common.base.Preconditions;
+
 import java.sql.Array;
 import java.sql.Blob;
 import java.sql.CallableStatement;
@@ -36,12 +38,10 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Executor;
 
-import parquet.Preconditions;
-
 /**
- * A connection decorator that ignores {@link java.sql.Connection#close} calls.
+ * A connection decorator that ignores {@link Connection#close} calls.
  *
- * All other calls are delegated to inner {@link java.sql.Connection connection}.
+ * All other calls are delegated to inner {@link Connection connection}.
  */
 public final class NonClosableConnection implements Connection {
   private final Connection delegate;

@@ -54,8 +54,8 @@ public class Cast${type.from}${type.to} implements DrillSimpleFunc{
     @Param BigIntHolder scale;
     @Output ${type.to}Holder out;
 
-    public void setup(RecordBatch incoming) {
-        int size = (${type.arraySize} * (org.apache.drill.exec.util.DecimalUtility.integerSize));
+    public void setup() {
+        int size = (${type.arraySize} * (org.apache.drill.exec.util.DecimalUtility.INTEGER_SIZE));
         buffer = buffer.reallocIfNeeded(size);
     }
 

@@ -1,5 +1,3 @@
-package org.apache.drill.exec.physical.impl.mergereceiver;
-
 /**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -17,8 +15,7 @@ package org.apache.drill.exec.physical.impl.mergereceiver;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-import io.netty.buffer.ByteBuf;
+package org.apache.drill.exec.physical.impl.mergereceiver;
 
 import java.io.IOException;
 import java.util.Comparator;
@@ -26,6 +23,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.PriorityQueue;
 
+import org.apache.calcite.rel.RelFieldCollation.Direction;
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.expression.ErrorCollector;
 import org.apache.drill.common.expression.ErrorCollectorImpl;
@@ -35,17 +33,15 @@ import org.apache.drill.common.logical.data.Order.Ordering;
 import org.apache.drill.exec.compile.sig.GeneratorMapping;
 import org.apache.drill.exec.compile.sig.MappingSet;
 import org.apache.drill.exec.exception.ClassTransformationException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.ClassGenerator;
 import org.apache.drill.exec.expr.ClassGenerator.HoldingContainer;
 import org.apache.drill.exec.expr.CodeGenerator;
 import org.apache.drill.exec.expr.ExpressionTreeMaterializer;
-import org.apache.drill.exec.expr.TypeHelper;
 import org.apache.drill.exec.expr.fn.FunctionGenerationHelper;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.MetricDef;
-import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.physical.MinorFragmentEndpoint;
 import org.apache.drill.exec.physical.config.MergingReceiverPOP;
 import org.apache.drill.exec.proto.BitControl.FinishedReceiver;
@@ -72,37 +68,36 @@ import org.apache.drill.exec.record.selection.SelectionVector2;
 import org.apache.drill.exec.record.selection.SelectionVector4;
 import org.apache.drill.exec.rpc.RpcException;
 import org.apache.drill.exec.rpc.RpcOutcomeListener;
+import org.apache.drill.exec.testing.ControlsInjector;
+import org.apache.drill.exec.testing.ControlsInjectorFactory;
 import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.CopyUtil;
 import org.apache.drill.exec.vector.FixedWidthVector;
 import org.apache.drill.exec.vector.ValueVector;
-import org.eigenbase.rel.RelFieldCollation.Direction;
-import org.eigenbase.rel.RelFieldCollation.NullDirection;
 
-import parquet.Preconditions;
-
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.sun.codemodel.JConditional;
 import com.sun.codemodel.JExpr;
 
 
+import io.netty.buffer.ByteBuf;
+
 /**
  * The MergingRecordBatch merges pre-sorted record batches from remote senders.
  */
 public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> implements RecordBatch {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(MergingRecordBatch.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(MergingRecordBatch.class);
+  private static final ControlsInjector injector = ControlsInjectorFactory.getInjector(MergingRecordBatch.class);
 
-  private static final long ALLOCATOR_INITIAL_RESERVATION = 1*1024*1024;
-  private static final long ALLOCATOR_MAX_RESERVATION = 20L*1000*1000*1000;
   private static final int OUTGOING_BATCH_SIZE = 32 * 1024;
 
   private RecordBatchLoader[] batchLoaders;
-  private RawFragmentBatchProvider[] fragProviders;
-  private FragmentContext context;
-  private BatchSchema schema;
+  private final RawFragmentBatchProvider[] fragProviders;
+  private final FragmentContext context;
   private VectorContainer outgoingContainer;
   private MergingReceiverGeneratorBase merger;
-  private MergingReceiverPOP config;
+  private final MergingReceiverPOP config;
   private boolean hasRun = false;
   private boolean prevBatchWasFull = false;
   private boolean hasMoreIncoming = true;
@@ -113,7 +108,9 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   private int[] batchOffsets;
   private PriorityQueue <Node> pqueue;
   private RawFragmentBatch emptyBatch = null;
-  private RawFragmentBatch[] tempBatchHolder; //
+  private RawFragmentBatch[] tempBatchHolder;
+  private long[] inputCounts;
+  private long[] outputCounts;
 
   public static enum Metric implements MetricDef{
     BYTES_RECEIVED,
@@ -126,29 +123,47 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
     }
   }
 
-  public MergingRecordBatch(FragmentContext context,
-                            MergingReceiverPOP config,
-                            RawFragmentBatchProvider[] fragProviders) throws OutOfMemoryException {
-    super(config, context, true, new OperatorContext(config, context, false));
-    //super(config, context);
+  public MergingRecordBatch(final FragmentContext context,
+                            final MergingReceiverPOP config,
+                            final RawFragmentBatchProvider[] fragProviders) throws OutOfMemoryException {
+    super(config, context, true, context.newOperatorContext(config));
     this.fragProviders = fragProviders;
     this.context = context;
     this.outgoingContainer = new VectorContainer(oContext);
     this.stats.setLongStat(Metric.NUM_SENDERS, config.getNumSenders());
     this.config = config;
+    this.inputCounts = new long[config.getNumSenders()];
+    this.outputCounts = new long[config.getNumSenders()];
   }
 
-  private RawFragmentBatch getNext(RawFragmentBatchProvider provider) throws IOException{
+  private RawFragmentBatch getNext(final int providerIndex) throws IOException {
     stats.startWait();
+    final RawFragmentBatchProvider provider = fragProviders[providerIndex];
     try {
-      RawFragmentBatch b = provider.getNext();
+      injector.injectInterruptiblePause(context.getExecutionControls(), "waiting-for-data", logger);
+      final RawFragmentBatch b = provider.getNext();
       if (b != null) {
         stats.addLongStat(Metric.BYTES_RECEIVED, b.getByteCount());
         stats.batchReceived(0, b.getHeader().getDef().getRecordCount(), false);
+        inputCounts[providerIndex] += b.getHeader().getDef().getRecordCount();
       }
       return b;
+    } catch(final InterruptedException e) {
+      // Preserve evidence that the interruption occurred so that code higher up on the call stack can learn of the
+      // interruption and respond to it if it wants to.
+      Thread.currentThread().interrupt();
+
+      return null;
     } finally {
       stats.stopWait();
+    }
+  }
+
+  private void clearBatches(List<RawFragmentBatch> batches) {
+    for (RawFragmentBatch batch : batches) {
+      if (batch != null) {
+        batch.release();
+      }
     }
   }
 
@@ -166,7 +181,7 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
       prevBatchWasFull = false;
     }
 
-    if (hasMoreIncoming == false) {
+    if (!hasMoreIncoming) {
       logger.debug("next() was called after all values have been processed");
       outgoingPosition = 0;
       return IterOutcome.NONE;
@@ -177,26 +192,28 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
       schemaChanged = true; // first iteration is always a schema change
 
       // set up each (non-empty) incoming record batch
-      List<RawFragmentBatch> rawBatches = Lists.newArrayList();
+      final List<RawFragmentBatch> rawBatches = Lists.newArrayList();
       int p = 0;
-      for (RawFragmentBatchProvider provider : fragProviders) {
-        RawFragmentBatch rawBatch = null;
-        try {
-          // check if there is a batch in temp holder before calling getNext(), as it may have been used when building schema
-          if (tempBatchHolder[p] != null) {
-            rawBatch = tempBatchHolder[p];
-            tempBatchHolder[p] = null;
-          } else {
-            rawBatch = getNext(provider);
-          }
-          p++;
-          if (rawBatch == null && context.isCancelled()) {
+      for (final RawFragmentBatchProvider provider : fragProviders) {
+        RawFragmentBatch rawBatch;
+        // check if there is a batch in temp holder before calling getNext(), as it may have been used when building schema
+        if (tempBatchHolder[p] != null) {
+          rawBatch = tempBatchHolder[p];
+          tempBatchHolder[p] = null;
+        } else {
+          try {
+            rawBatch = getNext(p);
+          } catch (final IOException e) {
+            context.fail(e);
             return IterOutcome.STOP;
           }
-        } catch (IOException e) {
-          context.fail(e);
+        }
+        if (rawBatch == null && !context.shouldContinue()) {
+          clearBatches(rawBatches);
           return IterOutcome.STOP;
         }
+
+        assert rawBatch != null : "rawBatch is null although context.shouldContinue() == true";
         if (rawBatch.getHeader().getDef().getRecordCount() != 0) {
           rawBatches.add(rawBatch);
         } else {
@@ -205,14 +222,16 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
             emptyBatch = rawBatch;
           }
           try {
-            while ((rawBatch = getNext(provider)) != null && rawBatch.getHeader().getDef().getRecordCount() == 0) {
-              ;
+            while ((rawBatch = getNext(p)) != null && rawBatch.getHeader().getDef().getRecordCount() == 0) {
+              // Do nothing
             }
-            if (rawBatch == null && context.isCancelled()) {
+            if (rawBatch == null && !context.shouldContinue()) {
+              clearBatches(rawBatches);
               return IterOutcome.STOP;
             }
-          } catch (IOException e) {
+          } catch (final IOException e) {
             context.fail(e);
+            clearBatches(rawBatches);
             return IterOutcome.STOP;
           }
           if (rawBatch != null) {
@@ -221,6 +240,7 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
             rawBatches.add(emptyBatch);
           }
         }
+        p++;
       }
 
       // allocate the incoming record batch loaders
@@ -233,13 +253,18 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
         batchLoaders[i] = new RecordBatchLoader(oContext.getAllocator());
       }
 
+      // after this point all batches have moved to incomingBatches
+      rawBatches.clear();
+
       int i = 0;
-      for (RawFragmentBatch batch : incomingBatches) {
+      for (final RawFragmentBatch batch : incomingBatches) {
         // initialize the incoming batchLoaders
-        UserBitShared.RecordBatchDef rbd = batch.getHeader().getDef();
+        final UserBitShared.RecordBatchDef rbd = batch.getHeader().getDef();
         try {
           batchLoaders[i].load(rbd, batch.getBody());
-        } catch(SchemaChangeException e) {
+          // TODO:  Clean:  DRILL-2933:  That load(...) no longer throws
+          // SchemaChangeException, so check/clean catch clause below.
+        } catch(final SchemaChangeException e) {
           logger.error("MergingReceiver failed to load record batch from remote host.  {}", e);
           context.fail(e);
           return IterOutcome.STOP;
@@ -249,54 +274,48 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
         ++i;
       }
 
+      // after this point all batches have been released and their bytebuf are in batchLoaders
+
       // Canonicalize each incoming batch, so that vectors are alphabetically sorted based on SchemaPath.
-      for (RecordBatchLoader loader : batchLoaders) {
+      for (final RecordBatchLoader loader : batchLoaders) {
         loader.canonicalize();
       }
 
       // Ensure all the incoming batches have the identical schema.
       if (!isSameSchemaAmongBatches(batchLoaders)) {
-        logger.error("Incoming batches for merging receiver have diffferent schemas!");
-        context.fail(new SchemaChangeException("Incoming batches for merging receiver have diffferent schemas!"));
+        context.fail(new SchemaChangeException("Incoming batches for merging receiver have different schemas!"));
         return IterOutcome.STOP;
       }
 
       // create the outgoing schema and vector container, and allocate the initial batch
-      SchemaBuilder bldr = BatchSchema.newBuilder().setSelectionVectorMode(BatchSchema.SelectionVectorMode.NONE);
-      int vectorCount = 0;
-      for (VectorWrapper<?> v : batchLoaders[0]) {
+      final SchemaBuilder bldr = BatchSchema.newBuilder().setSelectionVectorMode(BatchSchema.SelectionVectorMode.NONE);
+      for (final VectorWrapper<?> v : batchLoaders[0]) {
 
         // add field to the output schema
         bldr.addField(v.getField());
 
         // allocate a new value vector
-        ValueVector outgoingVector = outgoingContainer.addOrGet(v.getField());
-        ++vectorCount;
+        outgoingContainer.addOrGet(v.getField());
       }
       allocateOutgoing();
 
-
-      schema = bldr.build();
-      if (schema != null && !schema.equals(schema)) {
-        // TODO: handle case where one or more batches implicitly indicate schema change
-        logger.debug("Initial state has incoming batches with different schemas");
-      }
       outgoingContainer.buildSchema(BatchSchema.SelectionVectorMode.NONE);
 
       // generate code for merge operations (copy and compare)
       try {
         merger = createMerger();
-      } catch (SchemaChangeException e) {
+      } catch (final SchemaChangeException e) {
         logger.error("Failed to generate code for MergingReceiver.  {}", e);
         context.fail(e);
         return IterOutcome.STOP;
       }
 
       // allocate the priority queue with the generated comparator
-      this.pqueue = new PriorityQueue<Node>(fragProviders.length, new Comparator<Node>() {
-        public int compare(Node node1, Node node2) {
-          int leftIndex = (node1.batchId << 16) + node1.valueIndex;
-          int rightIndex = (node2.batchId << 16) + node2.valueIndex;
+      this.pqueue = new PriorityQueue<>(fragProviders.length, new Comparator<Node>() {
+        @Override
+        public int compare(final Node node1, final Node node2) {
+          final int leftIndex = (node1.batchId << 16) + node1.valueIndex;
+          final int rightIndex = (node2.batchId << 16) + node2.valueIndex;
           return merger.doEval(leftIndex, rightIndex);
         }
       });
@@ -305,14 +324,14 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
       for (int b = 0; b < senderCount; ++b) {
         while (batchLoaders[b] != null && batchLoaders[b].getRecordCount() == 0) {
           try {
-            RawFragmentBatch batch = getNext(fragProviders[b]);
+            final RawFragmentBatch batch = getNext(b);
             incomingBatches[b] = batch;
             if (batch != null) {
               batchLoaders[b].load(batch.getHeader().getDef(), batch.getBody());
             } else {
               batchLoaders[b].clear();
               batchLoaders[b] = null;
-              if (context.isCancelled()) {
+              if (!context.shouldContinue()) {
                 return IterOutcome.STOP;
               }
             }
@@ -332,33 +351,29 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
 
     while (!pqueue.isEmpty()) {
       // pop next value from pq and copy to outgoing batch
-      Node node = pqueue.peek();
+      final Node node = pqueue.peek();
       if (!copyRecordToOutgoingBatch(node)) {
         logger.debug("Outgoing vectors space is full; breaking");
         prevBatchWasFull = true;
-        break;
       }
       pqueue.poll();
 
-//      if (isOutgoingFull()) {
-//        // set a flag so that we reallocate on the next iteration
-//        logger.debug("Outgoing vectors record batch size reached; breaking");
-//        prevBatchWasFull = true;
-//      }
-
       if (node.valueIndex == batchLoaders[node.batchId].getRecordCount() - 1) {
         // reached the end of an incoming record batch
-        RawFragmentBatch nextBatch = null;
+        RawFragmentBatch nextBatch;
         try {
-          nextBatch = getNext(fragProviders[node.batchId]);
+          nextBatch = getNext(node.batchId);
 
           while (nextBatch != null && nextBatch.getHeader().getDef().getRecordCount() == 0) {
-            nextBatch = getNext(fragProviders[node.batchId]);
+            nextBatch = getNext(node.batchId);
           }
-          if (nextBatch == null && context.isCancelled()) {
+
+          assert nextBatch != null || inputCounts[node.batchId] == outputCounts[node.batchId]
+              : String.format("Stream %d input count: %d output count %d", node.batchId, inputCounts[node.batchId], outputCounts[node.batchId]);
+          if (nextBatch == null && !context.shouldContinue()) {
             return IterOutcome.STOP;
           }
-        } catch (IOException e) {
+        } catch (final IOException e) {
           context.fail(e);
           return IterOutcome.STOP;
         }
@@ -369,7 +384,7 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
           // batch is empty
           boolean allBatchesEmpty = true;
 
-          for (RawFragmentBatch batch : incomingBatches) {
+          for (final RawFragmentBatch batch : incomingBatches) {
             // see if all batches are empty so we can return OK_* or NONE
             if (batch != null) {
               allBatchesEmpty = false;
@@ -384,13 +399,19 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
 
           // this batch is empty; since the pqueue no longer references this batch, it will be
           // ignored in subsequent iterations.
-          continue;
+          if (prevBatchWasFull) {
+            break;
+          } else {
+            continue;
+          }
         }
 
-        UserBitShared.RecordBatchDef rbd = incomingBatches[node.batchId].getHeader().getDef();
+        final UserBitShared.RecordBatchDef rbd = incomingBatches[node.batchId].getHeader().getDef();
         try {
           batchLoaders[node.batchId].load(rbd, incomingBatches[node.batchId].getBody());
-        } catch(SchemaChangeException ex) {
+          // TODO:  Clean:  DRILL-2933:  That load(...) no longer throws
+          // SchemaChangeException, so check/clean catch clause below.
+        } catch(final SchemaChangeException ex) {
           context.fail(ex);
           return IterOutcome.STOP;
         }
@@ -412,7 +433,7 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
     }
 
     // set the value counts in the outgoing vectors
-    for (VectorWrapper vw : outgoingContainer) {
+    for (final VectorWrapper vw : outgoingContainer) {
       vw.getValueVector().getMutator().setValueCount(outgoingPosition);
     }
 
@@ -438,7 +459,8 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
     return outgoingContainer.getSchema();
   }
 
-  public void buildSchema() {
+  @Override
+  public void buildSchema() throws SchemaChangeException {
     // find frag provider that has data to use to build schema, and put in tempBatchHolder for later use
     tempBatchHolder = new RawFragmentBatch[fragProviders.length];
     int i = 0;
@@ -448,19 +470,28 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
           state = BatchState.DONE;
           return;
         }
-        RawFragmentBatch batch = getNext(fragProviders[i]);
+        final RawFragmentBatch batch = getNext(i);
+        if (batch == null) {
+          if (!context.shouldContinue()) {
+            state = BatchState.STOP;
+          } else {
+            state = BatchState.DONE;
+          }
+
+          break;
+        }
         if (batch.getHeader().getDef().getFieldCount() == 0) {
           i++;
           continue;
         }
         tempBatchHolder[i] = batch;
-        for (SerializedField field : batch.getHeader().getDef().getFieldList()) {
-          ValueVector v = outgoingContainer.addOrGet(MaterializedField.create(field));
+        for (final SerializedField field : batch.getHeader().getDef().getFieldList()) {
+          final ValueVector v = outgoingContainer.addOrGet(MaterializedField.create(field));
           v.allocateNew();
         }
         break;
       }
-    } catch (IOException e) {
+    } catch (final IOException e) {
       throw new DrillRuntimeException(e);
     }
     outgoingContainer = VectorContainer.canonicalize(outgoingContainer);
@@ -473,27 +504,29 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   }
 
   @Override
-  public void kill(boolean sendUpstream) {
+  public void kill(final boolean sendUpstream) {
     if (sendUpstream) {
       informSenders();
     } else {
-      cleanup();
-      for (RawFragmentBatchProvider provider : fragProviders) {
-        provider.kill(context);
-      }
+      close();
+    }
+
+    for (final RawFragmentBatchProvider provider : fragProviders) {
+      provider.kill(context);
     }
   }
 
   private void informSenders() {
-    FragmentHandle handlePrototype = FragmentHandle.newBuilder()
+    logger.info("Informing senders of request to terminate sending.");
+    final FragmentHandle handlePrototype = FragmentHandle.newBuilder()
             .setMajorFragmentId(config.getOppositeMajorFragmentId())
             .setQueryId(context.getHandle().getQueryId())
             .build();
-    for (MinorFragmentEndpoint providingEndpoint : config.getProvidingEndpoints()) {
-      FragmentHandle sender = FragmentHandle.newBuilder(handlePrototype)
+    for (final MinorFragmentEndpoint providingEndpoint : config.getProvidingEndpoints()) {
+      final FragmentHandle sender = FragmentHandle.newBuilder(handlePrototype)
               .setMinorFragmentId(providingEndpoint.getId())
               .build();
-      FinishedReceiver finishedReceiver = FinishedReceiver.newBuilder()
+      final FinishedReceiver finishedReceiver = FinishedReceiver.newBuilder()
               .setReceiver(context.getHandle())
               .setSender(sender)
               .build();
@@ -501,21 +534,31 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
     }
   }
 
+  // TODO: Code duplication. UnorderedReceiverBatch has the same implementation.
   private class OutcomeListener implements RpcOutcomeListener<Ack> {
 
     @Override
-    public void failed(RpcException ex) {
+    public void failed(final RpcException ex) {
       logger.warn("Failed to inform upstream that receiver is finished");
     }
 
     @Override
-    public void success(Ack value, ByteBuf buffer) {
+    public void success(final Ack value, final ByteBuf buffer) {
       // Do nothing
+    }
+
+    @Override
+    public void interrupted(final InterruptedException e) {
+      if (context.shouldContinue()) {
+        final String errMsg = "Received an interrupt RPC outcome while sending ReceiverFinished message";
+        logger.error(errMsg, e);
+        context.fail(new RpcException(errMsg, e));
+      }
     }
   }
 
   @Override
-  protected void killIncoming(boolean sendUpstream) {
+  protected void killIncoming(final boolean sendUpstream) {
     //No op
   }
 
@@ -535,12 +578,12 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   }
 
   @Override
-  public TypedFieldId getValueVectorId(SchemaPath path) {
+  public TypedFieldId getValueVectorId(final SchemaPath path) {
     return outgoingContainer.getValueVectorId(path);
   }
 
   @Override
-  public VectorWrapper<?> getValueAccessorById(Class<?> clazz, int... ids) {
+  public VectorWrapper<?> getValueAccessorById(final Class<?> clazz, final int... ids) {
     return outgoingContainer.getValueAccessorById(clazz, ids);
   }
 
@@ -549,10 +592,10 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
     return WritableBatch.get(this);
   }
 
-  private boolean isSameSchemaAmongBatches(RecordBatchLoader[] batchLoaders) {
+  private boolean isSameSchemaAmongBatches(final RecordBatchLoader[] batchLoaders) {
     Preconditions.checkArgument(batchLoaders.length > 0, "0 batch is not allowed!");
 
-    BatchSchema schema = batchLoaders[0].getSchema();
+    final BatchSchema schema = batchLoaders[0].getSchema();
 
     for (int i = 1; i < batchLoaders.length; i++) {
       if (!schema.equals(batchLoaders[i].getSchema())) {
@@ -564,8 +607,8 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   }
 
   private void allocateOutgoing() {
-    for (VectorWrapper w : outgoingContainer) {
-      ValueVector v = w.getValueVector();
+    for (final VectorWrapper w : outgoingContainer) {
+      final ValueVector v = w.getValueVector();
       if (v instanceof FixedWidthVector) {
         AllocationHelper.allocate(v, OUTGOING_BATCH_SIZE, 1);
       } else {
@@ -587,12 +630,12 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   private MergingReceiverGeneratorBase createMerger() throws SchemaChangeException {
 
     try {
-      CodeGenerator<MergingReceiverGeneratorBase> cg = CodeGenerator.get(MergingReceiverGeneratorBase.TEMPLATE_DEFINITION, context.getFunctionRegistry());
-      ClassGenerator<MergingReceiverGeneratorBase> g = cg.getRoot();
+      final CodeGenerator<MergingReceiverGeneratorBase> cg = CodeGenerator.get(MergingReceiverGeneratorBase.TEMPLATE_DEFINITION, context.getFunctionRegistry());
+      final ClassGenerator<MergingReceiverGeneratorBase> g = cg.getRoot();
 
       ExpandableHyperContainer batch = null;
       boolean first = true;
-      for (RecordBatchLoader loader : batchLoaders) {
+      for (final RecordBatchLoader loader : batchLoaders) {
         if (first) {
           batch = new ExpandableHyperContainer(loader);
           first = false;
@@ -606,7 +649,7 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
       g.setMappingSet(COPIER_MAPPING_SET);
       CopyUtil.generateCopies(g, batch, true);
       g.setMappingSet(MAIN_MAPPING);
-      MergingReceiverGeneratorBase merger = context.getImplementationClass(cg);
+      final MergingReceiverGeneratorBase merger = context.getImplementationClass(cg);
 
       merger.doSetup(context, batch, outgoingContainer);
       return merger;
@@ -621,28 +664,28 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   GeneratorMapping COPIER_MAPPING = new GeneratorMapping("doSetup", "doCopy", null, null);
   public final MappingSet COPIER_MAPPING_SET = new MappingSet(COPIER_MAPPING, COPIER_MAPPING);
 
-  private void generateComparisons(ClassGenerator g, VectorAccessible batch) throws SchemaChangeException {
+  private void generateComparisons(final ClassGenerator<?> g, final VectorAccessible batch) throws SchemaChangeException {
     g.setMappingSet(MAIN_MAPPING);
 
-    for (Ordering od : popConfig.getOrderings()) {
+    for (final Ordering od : popConfig.getOrderings()) {
       // first, we rewrite the evaluation stack for each side of the comparison.
-      ErrorCollector collector = new ErrorCollectorImpl();
+      final ErrorCollector collector = new ErrorCollectorImpl();
       final LogicalExpression expr = ExpressionTreeMaterializer.materialize(od.getExpr(), batch, collector,context.getFunctionRegistry());
       if (collector.hasErrors()) {
         throw new SchemaChangeException("Failure while materializing expression. " + collector.toErrorString());
       }
       g.setMappingSet(LEFT_MAPPING);
-      HoldingContainer left = g.addExpr(expr, false);
+      final HoldingContainer left = g.addExpr(expr, false);
       g.setMappingSet(RIGHT_MAPPING);
-      HoldingContainer right = g.addExpr(expr, false);
+      final HoldingContainer right = g.addExpr(expr, false);
       g.setMappingSet(MAIN_MAPPING);
 
       // next we wrap the two comparison sides and add the expression block for the comparison.
-      LogicalExpression fh =
+      final LogicalExpression fh =
           FunctionGenerationHelper.getOrderingComparator(od.nullsSortHigh(), left, right,
                                                          context.getFunctionRegistry());
-      HoldingContainer out = g.addExpr(fh, false);
-      JConditional jc = g.getEvalBlock()._if(out.getValue().ne(JExpr.lit(0)));
+      final HoldingContainer out = g.addExpr(fh, false);
+      final JConditional jc = g.getEvalBlock()._if(out.getValue().ne(JExpr.lit(0)));
 
       if (od.getDirection() == Direction.ASCENDING) {
         jc._then()._return(out.getValue());
@@ -660,8 +703,10 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
    *
    * @param node Reference to the next record to copy from the incoming batches
    */
-  private boolean copyRecordToOutgoingBatch(Node node) {
-    int inIndex = (node.batchId << 16) + node.valueIndex;
+  private boolean copyRecordToOutgoingBatch(final Node node) {
+    assert ++outputCounts[node.batchId] <= inputCounts[node.batchId]
+        : String.format("Stream %d input count: %d output count %d", node.batchId, inputCounts[node.batchId], outputCounts[node.batchId]);
+    final int inIndex = (node.batchId << 16) + node.valueIndex;
     merger.doCopy(inIndex, outgoingPosition);
     outgoingPosition++;
     if (outgoingPosition == OUTGOING_BATCH_SIZE) {
@@ -677,28 +722,23 @@ public class MergingRecordBatch extends AbstractRecordBatch<MergingReceiverPOP> 
   public class Node {
     public int batchId;      // incoming batch
     public int valueIndex;   // value within the batch
-    Node(int batchId, int valueIndex) {
+    Node(final int batchId, final int valueIndex) {
       this.batchId = batchId;
       this.valueIndex = valueIndex;
     }
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     outgoingContainer.clear();
     if (batchLoaders != null) {
-      for (RecordBatchLoader rbl : batchLoaders) {
+      for (final RecordBatchLoader rbl : batchLoaders) {
         if (rbl != null) {
           rbl.clear();
         }
       }
     }
-    oContext.close();
-    if (fragProviders != null) {
-      for (RawFragmentBatchProvider f : fragProviders) {
-        f.cleanup();
-      }
-    }
+    super.close();
   }
 
 }

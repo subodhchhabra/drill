@@ -24,7 +24,9 @@ import java.util.concurrent.TimeUnit;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.exec.cache.VectorAccessibleSerializable;
 import org.apache.drill.exec.memory.BufferAllocator;
+import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.record.BatchSchema;
+import org.apache.drill.exec.record.SchemaUtil;
 import org.apache.drill.exec.record.TransferPair;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorAccessible;
@@ -32,6 +34,7 @@ import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.record.VectorWrapper;
 import org.apache.drill.exec.record.WritableBatch;
 import org.apache.drill.exec.record.selection.SelectionVector2;
+import org.apache.drill.exec.record.selection.SelectionVector4;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -39,7 +42,7 @@ import org.apache.hadoop.fs.Path;
 
 import com.google.common.base.Stopwatch;
 
-public class BatchGroup implements VectorAccessible {
+public class BatchGroup implements VectorAccessible, AutoCloseable {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(BatchGroup.class);
 
   private VectorContainer currentContainer;
@@ -51,21 +54,34 @@ public class BatchGroup implements VectorAccessible {
   private FileSystem fs;
   private BufferAllocator allocator;
   private int spilledBatches = 0;
+  private OperatorContext context;
+  private BatchSchema schema;
 
-  public BatchGroup(VectorContainer container, SelectionVector2 sv2) {
+  public BatchGroup(VectorContainer container, SelectionVector2 sv2, OperatorContext context) {
     this.sv2 = sv2;
     this.currentContainer = container;
+    this.context = context;
   }
 
-  public BatchGroup(VectorContainer container, FileSystem fs, String path, BufferAllocator allocator) {
+  public BatchGroup(VectorContainer container, FileSystem fs, String path, OperatorContext context) {
     currentContainer = container;
     this.fs = fs;
     this.path = new Path(path);
-    this.allocator = allocator;
+    this.allocator = context.getAllocator();
+    this.context = context;
   }
 
   public SelectionVector2 getSv2() {
     return sv2;
+  }
+
+  /**
+   * Updates the schema for this batch group. The current as well as any deserialized batches will be coerced to this schema
+   * @param schema
+   */
+  public void setSchema(BatchSchema schema) {
+    currentContainer = SchemaUtil.coerceContainer(currentContainer, schema, context);
+    this.schema = schema;
   }
 
   public void addBatch(VectorContainer newContainer) throws IOException {
@@ -77,8 +93,7 @@ public class BatchGroup implements VectorAccessible {
     int recordCount = newContainer.getRecordCount();
     WritableBatch batch = WritableBatch.getBatchNoHVWrap(recordCount, newContainer, false);
     VectorAccessibleSerializable outputBatch = new VectorAccessibleSerializable(batch, allocator);
-    Stopwatch watch = new Stopwatch();
-    watch.start();
+    Stopwatch watch = Stopwatch.createStarted();
     outputBatch.writeToStream(outputStream);
     newContainer.zeroVectors();
     logger.debug("Took {} us to spill {} records", watch.elapsed(TimeUnit.MICROSECONDS), recordCount);
@@ -92,10 +107,12 @@ public class BatchGroup implements VectorAccessible {
       inputStream = fs.open(path);
     }
     VectorAccessibleSerializable vas = new VectorAccessibleSerializable(allocator);
-    Stopwatch watch = new Stopwatch();
-    watch.start();
+    Stopwatch watch = Stopwatch.createStarted();
     vas.readFromStream(inputStream);
     VectorContainer c =  vas.get();
+    if (schema != null) {
+      c = SchemaUtil.coerceContainer(c, schema, context);
+    }
 //    logger.debug("Took {} us to read {} records", watch.elapsed(TimeUnit.MICROSECONDS), c.getRecordCount());
     spilledBatches--;
     currentContainer.zeroVectors();
@@ -142,7 +159,9 @@ public class BatchGroup implements VectorAccessible {
     return currentContainer;
   }
 
-  public void cleanup() throws IOException {
+  @Override
+  public void close() throws IOException {
+    currentContainer.zeroVectors();
     if (sv2 != null) {
       sv2.clear();
     }
@@ -190,6 +209,16 @@ public class BatchGroup implements VectorAccessible {
   @Override
   public Iterator<VectorWrapper<?>> iterator() {
     return currentContainer.iterator();
+  }
+
+  @Override
+  public SelectionVector2 getSelectionVector2() {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public SelectionVector4 getSelectionVector4() {
+    throw new UnsupportedOperationException();
   }
 
 }

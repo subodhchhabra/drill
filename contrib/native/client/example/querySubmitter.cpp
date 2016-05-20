@@ -20,9 +20,10 @@
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
+#include <boost/thread.hpp>
 #include "drill/drillc.hpp"
 
-int nOptions=11;
+int nOptions=13;
 
 struct Option{
     char name[32];
@@ -39,7 +40,9 @@ struct Option{
     {"testCancel", "Cancel the query afterthe first record batch.", false},
     {"syncSend", "Send query only after previous result is received", false},
     {"hshakeTimeout", "Handshake timeout (second).", false},
-    {"queryTimeout", "Query timeout (second).", false}
+    {"queryTimeout", "Query timeout (second).", false},
+    {"user", "Username", false},
+    {"password", "Password", false}
 };
 
 std::map<std::string, std::string> qsOptionValues;
@@ -63,21 +66,27 @@ Drill::status_t SchemaListener(void* ctx, Drill::FieldDefPtr fields, Drill::Dril
     }
 }
 
+boost::mutex listenerMutex;
 Drill::status_t QueryResultsListener(void* ctx, Drill::RecordBatch* b, Drill::DrillClientError* err){
     // Invariant:
     // (received an record batch and err is NULL)
     // or
     // (received query state message passed by `err` and b is NULL)
+    boost::lock_guard<boost::mutex> listenerLock(listenerMutex);
     if(!err){
-        assert(b!=NULL);
-        b->print(std::cout, 0); // print all rows
-        std::cout << "DATA RECEIVED ..." << std::endl;
-        delete b; // we're done with this batch, we can delete it
-        if(bTestCancel){
-            return Drill::QRY_FAILURE;
+        if(b!=NULL){
+            b->print(std::cout, 0); // print all rows
+            std::cout << "DATA RECEIVED ..." << std::endl;
+            delete b; // we're done with this batch, we can delete it
+            if(bTestCancel){
+                return Drill::QRY_FAILURE;
+            }else{
+                return Drill::QRY_SUCCESS ;
+            }
         }else{
-            return Drill::QRY_SUCCESS ;
-        }
+            std::cout << "Query Complete." << std::endl;
+            return Drill::QRY_SUCCESS;
+		}
     }else{
         assert(b==NULL);
         switch(err->status) {
@@ -273,6 +282,8 @@ int main(int argc, char* argv[]) {
         std::string syncSend=qsOptionValues["syncSend"];
         std::string hshakeTimeout=qsOptionValues["hshakeTimeout"];
         std::string queryTimeout=qsOptionValues["queryTimeout"];
+        std::string user=qsOptionValues["user"];
+        std::string password=qsOptionValues["password"];
 
         Drill::QueryType type;
 
@@ -309,22 +320,44 @@ int main(int argc, char* argv[]) {
         std::vector<Drill::QueryHandle_t*>::iterator queryHandleIter;
 
         Drill::DrillClient client;
-        // To log to file
-        //DrillClient::initLogging("/var/log/drill/", l);
+#if defined _WIN32 || defined _WIN64
+        TCHAR tempPath[MAX_PATH];
+        GetTempPath(MAX_PATH, tempPath);
+		char logpathPrefix[MAX_PATH + 128];
+		strcpy(logpathPrefix,tempPath);
+		strcat(logpathPrefix, "\\drillclient");
+#else
+		char* logpathPrefix = "/var/log/drill/drillclient";
+#endif
+		// To log to file
+        Drill::DrillClient::initLogging(logpathPrefix, l);
         // To log to stderr
-        Drill::DrillClient::initLogging(NULL, l);
-        //Drill::DrillClientConfig::setBufferLimit(2*1024*1024); // 2MB. Allows us to hold at least two record batches.
+        //Drill::DrillClient::initLogging(NULL, l);
+
         int nQueries=queryInputs.size();
-        Drill::DrillClientConfig::setBufferLimit(nQueries*2*1024*1024); // 2MB per query. Allows us to hold at least two record batches.
+        Drill::DrillClientConfig::setBufferLimit(nQueries*2*1024*1024); // 2MB per query. The size of a record batch may vary, but is unlikely to exceed the 256 MB which is the default. 
 
-
-        if (!hshakeTimeout.empty()){
+        if(!hshakeTimeout.empty()){
             Drill::DrillClientConfig::setHandshakeTimeout(atoi(hshakeTimeout.c_str()));
         }
         if (!queryTimeout.empty()){
             Drill::DrillClientConfig::setQueryTimeout(atoi(queryTimeout.c_str()));
         }
-        if(client.connect(connectStr.c_str(), schema.c_str())!=Drill::CONN_SUCCESS){
+
+        Drill::DrillUserProperties props;
+        if(schema.length()>0){
+            props.setProperty(USERPROP_SCHEMA, schema);
+        }
+        if(user.length()>0){
+            props.setProperty(USERPROP_USERNAME, user);
+        }
+        if(password.length()>0){
+            props.setProperty(USERPROP_PASSWORD, password);
+        }
+
+        props.setProperty("someRandomProperty", "someRandomValue");
+
+        if(client.connect(connectStr.c_str(), &props)!=Drill::CONN_SUCCESS){
             std::cerr<< "Failed to connect with error: "<< client.getError() << " (Using:"<<connectStr<<")"<<std::endl;
             return -1;
         }
@@ -347,7 +380,7 @@ int main(int argc, char* argv[]) {
                 row=0;
                 Drill::RecordIterator* pRecIter=*recordIterIter;
                 Drill::FieldDefPtr fields= pRecIter->getColDefs();
-                while((ret=pRecIter->next()), ret==Drill::QRY_SUCCESS || ret==Drill::QRY_SUCCESS_WITH_INFO){
+                while((ret=pRecIter->next()), (ret==Drill::QRY_SUCCESS || ret==Drill::QRY_SUCCESS_WITH_INFO) && !pRecIter->hasError()){
                     fields = pRecIter->getColDefs();
                     row++;
                     if( (ret==Drill::QRY_SUCCESS_WITH_INFO  && pRecIter->hasSchemaChanged() )|| ( row%100==1)){
@@ -374,6 +407,7 @@ int main(int argc, char* argv[]) {
                 }
                 client.freeQueryIterator(&pRecIter);
             }
+            client.waitForResults();
         }else{
             if(bSyncSend){
                 for(queryInpIter = queryInputs.begin(); queryInpIter != queryInputs.end(); queryInpIter++) {

@@ -17,15 +17,16 @@
  */
 package org.apache.drill.exec.planner.sql.parser;
 
-import net.hydromatic.optiq.tools.Planner;
+import org.apache.calcite.tools.Planner;
 
 import org.apache.drill.exec.ops.QueryContext;
 import org.apache.drill.exec.planner.sql.handlers.AbstractSqlHandler;
 import org.apache.drill.exec.planner.sql.handlers.DefaultSqlHandler;
 import org.apache.drill.exec.planner.sql.handlers.SqlHandlerConfig;
-import org.eigenbase.relopt.hep.HepPlanner;
-import org.eigenbase.sql.SqlCall;
-import org.eigenbase.sql.parser.SqlParserPos;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.drill.exec.util.Pointer;
 
 /**
  * SqlCall interface with addition of method to get the handler.
@@ -38,5 +39,9 @@ public abstract class DrillSqlCall extends SqlCall {
 
   public AbstractSqlHandler getSqlHandler(SqlHandlerConfig config) {
     return new DefaultSqlHandler(config);
+  }
+
+  public AbstractSqlHandler getSqlHandler(SqlHandlerConfig config, Pointer<String> textPlan) {
+    return new DefaultSqlHandler(config, textPlan);
   }
 }

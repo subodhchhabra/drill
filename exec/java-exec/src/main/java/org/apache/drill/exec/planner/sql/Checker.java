@@ -17,16 +17,49 @@
  */
 package org.apache.drill.exec.planner.sql;
 
-import org.eigenbase.sql.SqlCallBinding;
-import org.eigenbase.sql.SqlOperandCountRange;
-import org.eigenbase.sql.SqlOperator;
-import org.eigenbase.sql.type.SqlOperandTypeChecker;
+import com.google.common.collect.Maps;
+import org.apache.calcite.sql.SqlCallBinding;
+import org.apache.calcite.sql.SqlOperandCountRange;
+import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.type.SqlOperandCountRanges;
+import org.apache.calcite.sql.type.SqlOperandTypeChecker;
+import org.apache.commons.lang3.tuple.Pair;
+
+import java.util.Map;
 
 class Checker implements SqlOperandTypeChecker {
   private SqlOperandCountRange range;
 
-  public Checker(int size) {
+  public static final Checker ANY_CHECKER = new Checker();
+  private static final Map<Pair<Integer, Integer>, Checker> checkerMap = Maps.newHashMap();
+
+  public static Checker getChecker(int min, int max) {
+    final Pair<Integer, Integer> range = Pair.of(min, max);
+    if(checkerMap.containsKey(range)) {
+      return checkerMap.get(range);
+    }
+
+    final Checker newChecker;
+    if(min == max) {
+      newChecker = new Checker(min);
+    } else {
+      newChecker = new Checker(min, max);
+    }
+
+    checkerMap.put(range, newChecker);
+    return newChecker;
+  }
+
+  private Checker(int size) {
     range = new FixedRange(size);
+  }
+
+  private Checker(int min, int max) {
+    range = SqlOperandCountRanges.between(min, max);
+  }
+
+  private Checker() {
+    range = SqlOperandCountRanges.any();
   }
 
   @Override
@@ -42,6 +75,16 @@ class Checker implements SqlOperandTypeChecker {
   @Override
   public String getAllowedSignatures(SqlOperator op, String opName) {
     return opName + "(Drill - Opaque)";
+  }
+
+  @Override
+  public Consistency getConsistency() {
+    return Consistency.NONE;
+  }
+
+  @Override
+  public boolean isOptional(int i) {
+    return false;
   }
 
 }

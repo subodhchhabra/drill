@@ -27,6 +27,8 @@ import org.apache.drill.exec.record.VectorWrapper;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
+import org.joda.time.DateTime;
+import org.joda.time.format.DateTimeFormat;
 
 public class VectorUtil {
 
@@ -35,9 +37,10 @@ public class VectorUtil {
   public static void showVectorAccessibleContent(VectorAccessible va, final String delimiter) {
 
     int rows = va.getRecordCount();
+    System.out.println(rows + " row(s):");
     List<String> columns = Lists.newArrayList();
     for (VectorWrapper<?> vw : va) {
-      columns.add(vw.getValueVector().getField().getPath().getAsUnescapedPath());
+      columns.add(vw.getValueVector().getField().getPath());
     }
 
     int width = columns.size();
@@ -52,7 +55,7 @@ public class VectorUtil {
         try{
           o = vw.getValueVector().getAccessor().getObject(row);
         }catch(Exception e){
-          throw new RuntimeException("failure while trying to read column " + vw.getField().getPath().toExpr());
+          throw new RuntimeException("failure while trying to read column " + vw.getField().getPath());
         }
         if (o == null) {
           //null value
@@ -80,7 +83,7 @@ public class VectorUtil {
     if (includeHeader) {
       List<String> columns = Lists.newArrayList();
       for (VectorWrapper<?> vw : va) {
-        columns.add(vw.getValueVector().getField().getPath().getAsUnescapedPath());
+        columns.add(vw.getValueVector().getField().getPath());
       }
 
       formattedResults.append(Joiner.on(delimiter).join(columns));
@@ -96,6 +99,10 @@ public class VectorUtil {
           rowValues.add("null");
         } else if (o instanceof byte[]) {
           rowValues.add(new String((byte[]) o));
+        } else if (o instanceof DateTime) {
+          // TODO(DRILL-3882) - remove this once the datetime is not returned in an
+          // object needlessly holding a timezone
+          rowValues.add(DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").print((DateTime) o));
         } else {
           rowValues.add(o.toString());
         }
@@ -127,11 +134,12 @@ public class VectorUtil {
       width += columnWidth + 2;
       formats.add("| %-" + columnWidth + "s");
       MaterializedField field = vw.getValueVector().getField();
-      columns.add(field.getPath().getAsUnescapedPath() + "<" + field.getType().getMinorType() + "(" + field.getType().getMode() + ")" + ">");
+      columns.add(field.getPath() + "<" + field.getType().getMinorType() + "(" + field.getType().getMode() + ")" + ">");
       columnIndex++;
     }
 
     int rows = va.getRecordCount();
+    System.out.println(rows + " row(s):");
     for (int row = 0; row < rows; row++) {
       // header, every 50 rows.
       if (row%50 == 0) {

@@ -17,6 +17,9 @@
  */
 package org.apache.drill.exec.physical.impl.xsort;
 
+import io.netty.buffer.DrillBuf;
+
+import java.io.IOException;
 import java.util.List;
 
 import javax.inject.Named;
@@ -47,9 +50,8 @@ public abstract class PriorityQueueCopierTemplate implements PriorityQueueCopier
     this.outgoing = outgoing;
     this.size = batchGroups.size();
 
-    BufferAllocator.PreAllocator preAlloc = allocator.getNewPreAllocator();
-    preAlloc.preAllocate(4 * size);
-    vector4 = new SelectionVector4(preAlloc.getAllocation(), size, Character.MAX_VALUE);
+    final DrillBuf drillBuf = allocator.buffer(4 * size);
+    vector4 = new SelectionVector4(drillBuf, size, Character.MAX_VALUE);
     doSetup(context, hyperBatch, outgoing);
 
     queueSize = 0;
@@ -65,7 +67,6 @@ public abstract class PriorityQueueCopierTemplate implements PriorityQueueCopier
     allocateVectors(targetRecordCount);
     for (int outgoingIndex = 0; outgoingIndex < targetRecordCount; outgoingIndex++) {
       if (queueSize == 0) {
-        cleanup();
         return 0;
       }
       int compoundIndex = vector4.get(0);
@@ -95,13 +96,17 @@ public abstract class PriorityQueueCopierTemplate implements PriorityQueueCopier
   }
 
   @Override
-  public void cleanup() {
+  public void close() throws IOException {
     vector4.clear();
-    for (VectorWrapper w: outgoing) {
+    for (final VectorWrapper<?> w: outgoing) {
       w.getValueVector().clear();
     }
-    for (VectorWrapper w : hyperBatch) {
+    for (final VectorWrapper<?> w : hyperBatch) {
       w.clear();
+    }
+
+    for (BatchGroup batchGroup : batchGroups) {
+      batchGroup.close();
     }
   }
 

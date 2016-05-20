@@ -36,11 +36,14 @@ import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.expression.parser.ExprLexer;
 import org.apache.drill.common.expression.parser.ExprParser;
 import org.apache.drill.common.expression.parser.ExprParser.parse_return;
+import org.apache.drill.common.types.TypeProtos;
 import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.common.types.Types;
 import org.apache.drill.exec.ExecTest;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
+import org.apache.drill.exec.memory.RootAllocatorFactory;
 import org.apache.drill.exec.physical.impl.project.Projector;
+import org.apache.drill.exec.record.MaterializedField;
 import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorWrapper;
@@ -49,10 +52,10 @@ import org.apache.drill.exec.vector.ValueVector;
 import org.junit.Test;
 
 public class ExpressionTest extends ExecTest {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ExpressionTest.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ExpressionTest.class);
 
-  DrillConfig c = DrillConfig.create();
-  FunctionImplementationRegistry registry = new FunctionImplementationRegistry(c);
+  private final DrillConfig c = DrillConfig.create();
+  private final FunctionImplementationRegistry registry = new FunctionImplementationRegistry(c);
 
   @Test
   public void testBasicExpression(@Injectable RecordBatch batch) throws Exception {
@@ -60,8 +63,19 @@ public class ExpressionTest extends ExecTest {
   }
 
   @Test
+  public void testExprParseUpperExponent(@Injectable RecordBatch batch) throws Exception {
+    getExpressionCode("multiply(`$f0`, 1.0E-4)", batch);
+  }
+
+  @Test
+  public void testExprParseLowerExponent(@Injectable RecordBatch batch) throws Exception {
+    getExpressionCode("multiply(`$f0`, 1.0e-4)", batch);
+  }
+
+  @Test
   public void testSpecial(final @Injectable RecordBatch batch, @Injectable ValueVector vector) throws Exception {
-    final TypedFieldId tfid = new TypedFieldId(Types.optional(MinorType.INT), false, 0);
+    final TypeProtos.MajorType type = Types.optional(MinorType.INT);
+    final TypedFieldId tfid = new TypedFieldId(type, false, 0);
 
     new NonStrictExpectations() {
       @NonStrict VectorWrapper<?> wrapper;
@@ -71,7 +85,7 @@ public class ExpressionTest extends ExecTest {
         batch.getValueAccessorById(IntVector.class, tfid.getFieldIds());
         result = wrapper;
         wrapper.getValueVector();
-        result = new IntVector(null, null);
+        result = new IntVector(MaterializedField.create("result", type), RootAllocatorFactory.newRoot(c));
       }
 
     };
@@ -107,25 +121,24 @@ public class ExpressionTest extends ExecTest {
   // HELPER METHODS //
 
   private LogicalExpression parseExpr(String expr) throws RecognitionException {
-    ExprLexer lexer = new ExprLexer(new ANTLRStringStream(expr));
-    CommonTokenStream tokens = new CommonTokenStream(lexer);
-    ExprParser parser = new ExprParser(tokens);
+    final ExprLexer lexer = new ExprLexer(new ANTLRStringStream(expr));
+    final CommonTokenStream tokens = new CommonTokenStream(lexer);
+    final ExprParser parser = new ExprParser(tokens);
     parse_return ret = parser.parse();
     return ret.e;
   }
 
   private String getExpressionCode(String expression, RecordBatch batch) throws Exception {
-    LogicalExpression expr = parseExpr(expression);
-    ErrorCollector error = new ErrorCollectorImpl();
-    LogicalExpression materializedExpr = ExpressionTreeMaterializer.materialize(expr, batch, error, registry);
+    final LogicalExpression expr = parseExpr(expression);
+    final ErrorCollector error = new ErrorCollectorImpl();
+    final LogicalExpression materializedExpr = ExpressionTreeMaterializer.materialize(expr, batch, error, registry);
     if (error.getErrorCount() != 0) {
       logger.error("Failure while materializing expression [{}].  Errors: {}", expression, error);
       assertEquals(0, error.getErrorCount());
     }
 
-    ClassGenerator<Projector> cg = CodeGenerator.get(Projector.TEMPLATE_DEFINITION, new FunctionImplementationRegistry(DrillConfig.create())).getRoot();
+    final ClassGenerator<Projector> cg = CodeGenerator.get(Projector.TEMPLATE_DEFINITION, new FunctionImplementationRegistry(DrillConfig.create())).getRoot();
     cg.addExpr(new ValueVectorWriteExpression(new TypedFieldId(materializedExpr.getMajorType(), -1), materializedExpr));
     return cg.getCodeGenerator().generateAndGet();
   }
-
 }

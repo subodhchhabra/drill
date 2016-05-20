@@ -17,21 +17,27 @@
  ******************************************************************************/
 package org.apache.drill;
 
-import org.apache.drill.common.expression.SchemaPath;
-import org.apache.drill.common.types.MinorType;
-import org.apache.drill.common.types.TypeProtos;
-import org.apache.drill.common.types.Types;
-import org.apache.drill.exec.util.JsonStringArrayList;
-import org.apache.drill.exec.util.JsonStringHashMap;
-import org.apache.hadoop.io.Text;
-import org.junit.Ignore;
-import org.junit.Test;
+import static org.apache.drill.TestBuilder.listOf;
+import static org.apache.drill.TestBuilder.mapOf;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
 
 import java.math.BigDecimal;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.common.types.TypeProtos;
+import org.apache.drill.common.types.Types;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
+import org.hamcrest.CoreMatchers;
+import org.junit.Test;
+
+import com.google.common.collect.Lists;
 
 // TODO - update framework to remove any dependency on the Drill engine for reading baseline result sets
 // currently using it with the assumption that the csv and json readers are well tested, and handling diverse
@@ -40,6 +46,63 @@ import static org.junit.Assert.assertEquals;
 public class TestFrameworkTest extends BaseTestQuery{
 
   private static String CSV_COLS = " cast(columns[0] as bigint) employee_id, columns[1] as first_name, columns[2] as last_name ";
+
+  @Test(expected = AssertionError.class)
+  public void testSchemaTestBuilderSetInvalidBaselineValues() throws Exception {
+    final String query = "SELECT ltrim('drill') as col FROM (VALUES(1)) limit 0";
+
+    List<Pair<SchemaPath, TypeProtos.MajorType>> expectedSchema = Lists.newArrayList();
+    TypeProtos.MajorType majorType = TypeProtos.MajorType.newBuilder()
+            .setMinorType(TypeProtos.MinorType.VARCHAR)
+            .setMode(TypeProtos.DataMode.REQUIRED)
+            .build();
+    expectedSchema.add(Pair.of(SchemaPath.getSimplePath("col"), majorType));
+
+    testBuilder()
+            .sqlQuery(query)
+            .schemaBaseLine(expectedSchema)
+            .baselineValues(new Object[0])
+            .build()
+            .run();
+  }
+
+  @Test(expected = AssertionError.class)
+  public void testSchemaTestBuilderSetInvalidBaselineRecords() throws Exception {
+    final String query = "SELECT ltrim('drill') as col FROM (VALUES(1)) limit 0";
+
+    List<Pair<SchemaPath, TypeProtos.MajorType>> expectedSchema = Lists.newArrayList();
+    TypeProtos.MajorType majorType = TypeProtos.MajorType.newBuilder()
+        .setMinorType(TypeProtos.MinorType.VARCHAR)
+        .setMode(TypeProtos.DataMode.REQUIRED)
+        .build();
+    expectedSchema.add(Pair.of(SchemaPath.getSimplePath("col"), majorType));
+
+    testBuilder()
+        .sqlQuery(query)
+        .schemaBaseLine(expectedSchema)
+        .baselineRecords(Collections.<Map<String, Object>>emptyList())
+        .build()
+        .run();
+  }
+
+  @Test(expected = AssertionError.class)
+  public void testSchemaTestBuilderSetInvalidBaselineColumns() throws Exception {
+    final String query = "SELECT ltrim('drill') as col FROM (VALUES(1)) limit 0";
+
+    List<Pair<SchemaPath, TypeProtos.MajorType>> expectedSchema = Lists.newArrayList();
+    TypeProtos.MajorType majorType = TypeProtos.MajorType.newBuilder()
+            .setMinorType(TypeProtos.MinorType.VARCHAR)
+            .setMode(TypeProtos.DataMode.REQUIRED)
+            .build();
+    expectedSchema.add(Pair.of(SchemaPath.getSimplePath("col"), majorType));
+
+    testBuilder()
+        .sqlQuery(query)
+        .baselineColumns("col")
+        .schemaBaseLine(expectedSchema)
+        .build()
+        .run();
+  }
 
   @Test
   public void testCSVVerification() throws Exception {
@@ -71,33 +134,38 @@ public class TestFrameworkTest extends BaseTestQuery{
 
   @Test
   public void testDecimalBaseline() throws  Exception {
-    // type information can be provided explicitly
-    testBuilder()
-        .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
-        .unOrdered()
-        .csvBaselineFile("testframework/decimal_test.tsv")
-        .baselineTypes(Types.withScaleAndPrecision(TypeProtos.MinorType.DECIMAL38SPARSE, TypeProtos.DataMode.REQUIRED, 2, 38))
-        .baselineColumns("dec_col")
-        .build().run();
+    try {
+      test(String.format("alter session set `%s` = true", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
 
-    // type information can also be left out, this will prompt the result types of the test query to drive the
-    // interpretation of the test file
-    testBuilder()
-        .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
-        .unOrdered()
-        .csvBaselineFile("testframework/decimal_test.tsv")
-        .baselineColumns("dec_col")
-        .build().run();
+      // type information can be provided explicitly
+      testBuilder()
+          .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
+          .unOrdered()
+          .csvBaselineFile("testframework/decimal_test.tsv")
+          .baselineTypes(Types.withScaleAndPrecision(TypeProtos.MinorType.DECIMAL38SPARSE, TypeProtos.DataMode.REQUIRED, 2, 38))
+          .baselineColumns("dec_col")
+          .build().run();
 
-    // Or you can provide explicit values to the builder itself to avoid going through the drill engine at all to
-    // populate the baseline results
-    testBuilder()
-        .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
-        .unOrdered()
-        .baselineColumns("dec_col")
-        .baselineValues(new BigDecimal("3.70"))
-        .build().run();
+      // type information can also be left out, this will prompt the result types of the test query to drive the
+      // interpretation of the test file
+      testBuilder()
+          .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
+          .unOrdered()
+          .csvBaselineFile("testframework/decimal_test.tsv")
+          .baselineColumns("dec_col")
+          .build().run();
 
+      // Or you can provide explicit values to the builder itself to avoid going through the drill engine at all to
+      // populate the baseline results
+      testBuilder()
+          .sqlQuery("select cast(dec_col as decimal(38,2)) dec_col from cp.`testframework/decimal_test.json`")
+          .unOrdered()
+          .baselineColumns("dec_col")
+          .baselineValues(new BigDecimal("3.70"))
+          .build().run();
+    } finally {
+      test(String.format("alter session set `%s` = false", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
+    }
   }
 
   @Test
@@ -134,40 +202,20 @@ public class TestFrameworkTest extends BaseTestQuery{
 
   @Test
   public void testBaselineValsVerificationWithComplexAndNulls() throws Exception {
-    JsonStringArrayList list = new JsonStringArrayList();
-    JsonStringArrayList innerList1 = new JsonStringArrayList();
-    innerList1.add(2l);
-    innerList1.add(1l);
-    JsonStringArrayList innerList2 = new JsonStringArrayList();
-    innerList2.add(4l);
-    innerList2.add(6l);
-    list.add(innerList1);
-    list.add(innerList2);
-
-    JsonStringArrayList l_list = new JsonStringArrayList();
-    l_list.add(4l);
-    l_list.add(2l);
-
-    JsonStringHashMap x = new JsonStringHashMap();
-    x.put("y", new Text("kevin"));
-    x.put("z", new Text("paul"));
-
-    // [{"orange":"yellow","pink":"red"},{"pink":"purple"}]
-    JsonStringArrayList z = new JsonStringArrayList();
-    JsonStringHashMap z_1 = new JsonStringHashMap();
-    z_1.put("orange", new Text("yellow"));
-    z_1.put("pink", new Text("red"));
-
-    JsonStringHashMap z_2 = new JsonStringHashMap();
-    z_2.put("pink", new Text("purple"));
-    z.add(z_1);
-    z.add(z_2);
-
     testBuilder()
         .sqlQuery("select * from cp.`/jsoninput/input2.json` limit 1")
         .ordered()
         .baselineColumns("integer", "float", "x", "z", "l", "rl")
-        .baselineValues(2010l, 17.4, x, z, l_list, list)
+        .baselineValues(2010l,
+                        17.4,
+                        mapOf("y", "kevin",
+                            "z", "paul"),
+                        listOf(mapOf("orange", "yellow",
+                                "pink", "red"),
+                            mapOf("pink", "purple")),
+                        listOf(4l, 2l),
+                        listOf(listOf(2l, 1l),
+                            listOf(4l, 6l)))
         .build().run();
   }
 
@@ -236,7 +284,7 @@ public class TestFrameworkTest extends BaseTestQuery{
           .baselineColumns("employee_id", "first_name", "last_name", "address")
           .build().run();
     } catch (Exception ex) {
-      assertEquals("Expected column(s) `address`,  not found in result set.", ex.getMessage());
+      assertTrue(ex.getMessage(), ex.getMessage().startsWith("Expected column(s) `address`,  not found in result set"));
       // this indicates successful completion of the test
       return;
     }
@@ -254,7 +302,8 @@ public class TestFrameworkTest extends BaseTestQuery{
         .baselineColumns("employee_id", "first_name", "last_name")
         .build().run();
     } catch (Exception ex) {
-      assertEquals("at position 0 column '`employee_id`' mismatched values, expected: 12(Integer) but received 12(Long)", ex.getMessage());
+      assertThat(ex.getMessage(), CoreMatchers.containsString(
+          "at position 0 column '`employee_id`' mismatched values, expected: 12(Integer) but received 12(Long)"));
       // this indicates successful completion of the test
       return;
     }
@@ -271,7 +320,8 @@ public class TestFrameworkTest extends BaseTestQuery{
           .baselineColumns("employee_id", "first_name", "last_name")
           .build().run();
     } catch (Exception ex) {
-      assertEquals("at position 0 column '`first_name`' mismatched values, expected: Jewel(String) but received Peggy(String)", ex.getMessage());
+      assertThat(ex.getMessage(), CoreMatchers.containsString(
+          "at position 0 column '`employee_id`' mismatched values, expected: 12(String) but received 16(String)"));
       // this indicates successful completion of the test
       return;
     }
@@ -336,9 +386,9 @@ public class TestFrameworkTest extends BaseTestQuery{
           .optionSettingQueriesForBaseline("alter system set `store.json.all_text_mode` = true")
           .build().run();
     } catch (Exception ex) {
-      assertEquals("at position 1 column '`field_1`' mismatched values, " +
-          "expected: [\"5\",\"2\",\"3\",\"4\",\"1\",\"2\"](JsonStringArrayList) but received [\"5\"](JsonStringArrayList)",
-          ex.getMessage());
+      assertThat(ex.getMessage(), CoreMatchers.containsString(
+          "at position 1 column '`field_1`' mismatched values, " +
+          "expected: [\"5\",\"2\",\"3\",\"4\",\"1\",\"2\"](JsonStringArrayList) but received [\"5\"](JsonStringArrayList)"));
       // this indicates successful completion of the test
       return;
     }
@@ -357,7 +407,7 @@ public class TestFrameworkTest extends BaseTestQuery{
           .expectsEmptyResultSet()
           .build().run();
     } catch (AssertionError ex) {
-      assertEquals("Different number of records returned expected:<4> but was:<0>", ex.getMessage());
+      assertEquals("Different number of records returned expected:<0> but was:<4>", ex.getMessage());
       // this indicates successful completion of the test
       return;
     }

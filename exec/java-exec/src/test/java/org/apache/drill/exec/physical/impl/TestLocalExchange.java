@@ -32,15 +32,16 @@ import org.apache.drill.exec.planner.fragment.Fragment;
 import org.apache.drill.exec.planner.fragment.Fragment.ExchangeFragmentPair;
 import org.apache.drill.exec.planner.fragment.PlanningSet;
 import org.apache.drill.exec.planner.fragment.SimpleParallelizer;
-import org.apache.drill.exec.planner.physical.PrelUtil;
 import org.apache.drill.exec.pop.PopUnitTestBase;
 import org.apache.drill.exec.proto.BitControl.PlanFragment;
+import org.apache.drill.exec.proto.BitControl.QueryContextInformation;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.proto.UserBitShared;
 import org.apache.drill.exec.proto.UserBitShared.QueryId;
 import org.apache.drill.exec.rpc.user.UserSession;
 import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.server.options.OptionList;
+import org.apache.drill.exec.util.Utilities;
 import org.apache.drill.exec.work.QueryWorkUnit;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
@@ -55,6 +56,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.List;
 
+import static org.apache.drill.exec.planner.physical.HashPrelUtil.HASH_EXPR_NAME;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -107,7 +109,7 @@ public class TestLocalExchange extends PlanTestBase {
 
   @BeforeClass
   public static void setupClusterSize() {
-    setDrillbitCount(CLUSTER_SIZE);
+    updateTestCluster(CLUSTER_SIZE, null);
   }
 
   @BeforeClass
@@ -206,7 +208,7 @@ public class TestLocalExchange extends PlanTestBase {
     final String plan = getPlanInString("EXPLAIN PLAN FOR " + groupByMultipleQuery, JSON_FORMAT);
     System.out.println("Plan: " + plan);
 
-    jsonExchangeOrderChecker(plan, false, 1, "xor\\(xor\\(hash\\(.*\\) , hash\\(.*\\) \\) , hash\\(.*\\) \\) ");
+    jsonExchangeOrderChecker(plan, false, 1, "hash32asdouble\\(.*, hash32asdouble\\(.*, hash32asdouble\\(.*\\) \\) \\) ");
 
     // Run the query and verify the output
     final TestBuilder testBuilder = testBuilder()
@@ -283,10 +285,10 @@ public class TestLocalExchange extends PlanTestBase {
 
     if ( isMuxOn ) {
       // # of hash exchanges should be = # of mux exchanges + # of demux exchanges
-      assertEquals("HashExpr on the hash column should not happen", 2*expectedNumMuxes+expectedNumDeMuxes, StringUtils.countMatches(plan, PrelUtil.HASH_EXPR_NAME));
-      jsonExchangeOrderChecker(plan, isDeMuxOn, expectedNumMuxes, "hash(.*) ");
+      assertEquals("HashExpr on the hash column should not happen", 2*expectedNumMuxes+expectedNumDeMuxes, StringUtils.countMatches(plan, HASH_EXPR_NAME));
+      jsonExchangeOrderChecker(plan, isDeMuxOn, expectedNumMuxes, "hash32asdouble\\(.*\\) ");
     } else {
-      assertEquals("HashExpr on the hash column should not happen", 0, StringUtils.countMatches(plan, PrelUtil.HASH_EXPR_NAME));
+      assertEquals("HashExpr on the hash column should not happen", 0, StringUtils.countMatches(plan, HASH_EXPR_NAME));
     }
 
     // Make sure the plan has mux and demux exchanges (TODO: currently testing is rudimentary,
@@ -329,7 +331,7 @@ public class TestLocalExchange extends PlanTestBase {
           final JSONArray exprsArray = (JSONArray) popObj.get("exprs");
           for (Object exprObj : exprsArray) {
             final JSONObject expr = (JSONObject) exprObj;
-            if ( expr.containsKey("ref") && expr.get("ref").equals("`"+PrelUtil.HASH_EXPR_NAME +"`")) {
+            if ( expr.containsKey("ref") && expr.get("ref").equals("`"+ HASH_EXPR_NAME +"`")) {
               // found a match. Let's see if next one is the one we need
               final String hashField = (String) expr.get("expr");
               assertNotNull("HashExpr field can not be null", hashField);
@@ -359,7 +361,7 @@ public class TestLocalExchange extends PlanTestBase {
             popObj.containsKey("pop") && popObj.get("pop").equals(HASH_EXCHANGE));
         // is HashToRandom is using HashExpr
         assertTrue("HashToRandomExchnage should use hashExpr",
-            popObj.containsKey("expr") && popObj.get("expr").equals("`"+PrelUtil.HASH_EXPR_NAME +"`"));
+            popObj.containsKey("expr") && popObj.get("expr").equals("`"+ HASH_EXPR_NAME +"`"));
       }
       // if Demux is enabled it also should use HashExpr
       if ( isDemuxEnabled && k == i-3) {
@@ -367,7 +369,7 @@ public class TestLocalExchange extends PlanTestBase {
             popObj.containsKey("pop") && popObj.get("pop").equals(DEMUX_EXCHANGE_CONST));
         // is HashToRandom is using HashExpr
         assertTrue("UnorderdDemuxExchange should use hashExpr",
-            popObj.containsKey("expr") && popObj.get("expr").equals("`"+PrelUtil.HASH_EXPR_NAME +"`"));
+            popObj.containsKey("expr") && popObj.get("expr").equals("`"+HASH_EXPR_NAME +"`"));
       }
       if ( (isDemuxEnabled && k == i-4) || (!isDemuxEnabled && k == i-3) ) {
         // it should be a project without hashexpr, check if number of exprs is 1 less then in first project
@@ -405,9 +407,10 @@ public class TestLocalExchange extends PlanTestBase {
 
     findFragmentsWithPartitionSender(rootFragment, planningSet, deMuxFragments, htrFragments);
 
+    final QueryContextInformation queryContextInfo = Utilities.createQueryContextInfo("dummySchemaName");
     QueryWorkUnit qwu = PARALLELIZER.getFragments(new OptionList(), drillbitContext.getEndpoint(),
         QueryId.getDefaultInstance(),
-        drillbitContext.getBits(), planReader, rootFragment, USER_SESSION);
+        drillbitContext.getBits(), planReader, rootFragment, USER_SESSION, queryContextInfo);
 
     // Make sure the number of minor fragments with HashPartitioner within a major fragment is not more than the
     // number of Drillbits in cluster

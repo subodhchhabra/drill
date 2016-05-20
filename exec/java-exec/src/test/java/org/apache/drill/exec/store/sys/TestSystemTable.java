@@ -19,10 +19,16 @@ package org.apache.drill.exec.store.sys;
 
 import org.apache.drill.BaseTestQuery;
 import org.apache.drill.exec.ExecConstants;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestSystemTable extends BaseTestQuery {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestSystemTable.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestSystemTable.class);
+
+  @BeforeClass
+  public static void setupMultiNodeCluster() throws Exception {
+    updateTestCluster(3, null);
+  }
 
   @Test
   public void alterSessionOption() throws Exception {
@@ -43,5 +49,21 @@ public class TestSystemTable extends BaseTestQuery {
       .baselineValues(false)
       .baselineValues(true)
       .go();
+  }
+
+  // DRILL-2670
+  @Test
+  public void optionsOrderBy() throws Exception {
+    test("select * from sys.options order by name");
+  }
+
+  @Test
+  public void threadsTable() throws Exception {
+    test("select * from sys.threads");
+  }
+
+  @Test
+  public void memoryTable() throws Exception {
+    test("select * from sys.memory");
   }
 }

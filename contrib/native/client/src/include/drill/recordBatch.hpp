@@ -56,6 +56,7 @@ namespace exec{
         class SerializedField;
         class RecordBatchDef;
         class QueryResult;
+        class QueryData;
     };
 };
 
@@ -460,7 +461,7 @@ template <typename VALUE_TYPE>
 // We don't really need a destructor here, but we declare a virtual dtor in the base class in case we ever get
 // more complex and start doing dynamic allocations in these classes.
 
-struct DateTimeBase{
+struct DECLSPEC_DRILL_CLIENT DateTimeBase{
     DateTimeBase():m_datetime(0){}
     virtual ~DateTimeBase(){}
     int64_t m_datetime;
@@ -469,7 +470,7 @@ struct DateTimeBase{
     virtual std::string toString()=0;
 };
 
-struct DateHolder: public virtual DateTimeBase{
+struct DECLSPEC_DRILL_CLIENT DateHolder: public virtual DateTimeBase{
     DateHolder(){};
     DateHolder(int64_t d){m_datetime=d; load();}
     int32_t m_year;
@@ -479,7 +480,7 @@ struct DateHolder: public virtual DateTimeBase{
     std::string toString();
 };
 
-struct TimeHolder: public virtual DateTimeBase{
+struct DECLSPEC_DRILL_CLIENT TimeHolder: public virtual DateTimeBase{
     TimeHolder(){};
     TimeHolder(uint32_t d){m_datetime=d; load();}
     uint32_t m_hr;
@@ -490,14 +491,14 @@ struct TimeHolder: public virtual DateTimeBase{
     std::string toString();
 };
 
-struct DateTimeHolder: public DateHolder, public TimeHolder{
+struct DECLSPEC_DRILL_CLIENT DateTimeHolder: public DateHolder, public TimeHolder{
     DateTimeHolder(){};
     DateTimeHolder(int64_t d){m_datetime=d; load();}
     void load();
     std::string toString();
 };
 
-struct DateTimeTZHolder: public DateTimeHolder{
+struct DECLSPEC_DRILL_CLIENT DateTimeTZHolder: public DateTimeHolder{
     DateTimeTZHolder(ByteBuf_t b){
         m_datetime=*(int64_t*)b;
         m_tzIndex=*(uint32_t*)(b+sizeof(uint64_t));
@@ -863,7 +864,7 @@ class DECLSPEC_DRILL_CLIENT RecordBatch{
         //m_allocatedBuffer is the memory block allocated to hold the incoming RPC message. Record Batches operate on
         //slices of the allocated buffer. The first slice (the first Field Batch), begins at m_buffer. Data in the
         //allocated buffer before m_buffer is mostly the RPC header, and the QueryResult object.
-        RecordBatch(exec::shared::QueryResult* pResult, AllocatedBufferPtr r, ByteBuf_t b);
+        RecordBatch(exec::shared::QueryData* pResult, AllocatedBufferPtr r, ByteBuf_t b);
 
         ~RecordBatch();
 
@@ -876,7 +877,7 @@ class DECLSPEC_DRILL_CLIENT RecordBatch{
         size_t getNumRecords(){ return m_numRecords;}
         std::vector<FieldBatch*>& getFields(){ return m_fields;}
         size_t getNumFields();
-        bool isLastChunk();
+        DEPRECATED bool isLastChunk();
 
         boost::shared_ptr<std::vector<Drill::FieldMetadata*> > getColumnDefs(){ return m_fieldDefs;}
 
@@ -902,10 +903,10 @@ class DECLSPEC_DRILL_CLIENT RecordBatch{
         bool hasSchemaChanged(){ return m_bHasSchemaChanged;}
 
         #ifdef DEBUG
-        const exec::shared::QueryResult* getQueryResult(){ return this->m_pQueryResult;}
+        const exec::shared::QueryData* getQueryResult(){ return this->m_pQueryResult;}
         #endif
     private:
-        const exec::shared::QueryResult* m_pQueryResult;
+        const exec::shared::QueryData* m_pQueryResult;
         const exec::shared::RecordBatchDef* m_pRecordBatchDef;
         AllocatedBufferPtr m_allocatedBuffer;
         ByteBuf_t m_buffer;

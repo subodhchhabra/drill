@@ -20,6 +20,17 @@ package org.apache.drill.exec.planner.logical;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.InvalidRelException;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexUtil;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.util.Pair;
 import org.apache.drill.common.expression.FieldReference;
 import org.apache.drill.common.logical.data.Join;
 import org.apache.drill.common.logical.data.JoinCondition;
@@ -27,50 +38,29 @@ import org.apache.drill.common.logical.data.LogicalOperator;
 import org.apache.drill.common.logical.data.Project;
 import org.apache.drill.exec.planner.common.DrillJoinRelBase;
 import org.apache.drill.exec.planner.torel.ConversionContext;
-import org.eigenbase.rel.InvalidRelException;
-import org.eigenbase.rel.JoinRelType;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelOptUtil;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.reltype.RelDataTypeField;
-import org.eigenbase.rex.RexNode;
-import org.eigenbase.rex.RexUtil;
-import org.eigenbase.sql.fun.SqlStdOperatorTable;
-import org.eigenbase.util.Pair;
-
-import com.google.common.collect.Lists;
 
 /**
- * Join implemented in Drill.
+ * Logical Join implemented in Drill.
  */
 public class DrillJoinRel extends DrillJoinRelBase implements DrillRel {
 
-  /** Creates a DrillJoinRel. */
+  /** Creates a DrillJoinRel.
+   * We do not throw InvalidRelException in Logical planning phase. It's up to the post-logical planning check or physical planning
+   * to detect the unsupported join type, and throw exception.
+   * */
   public DrillJoinRel(RelOptCluster cluster, RelTraitSet traits, RelNode left, RelNode right, RexNode condition,
-      JoinRelType joinType) throws InvalidRelException {
+      JoinRelType joinType)  {
     super(cluster, traits, left, right, condition, joinType);
-
-    RexNode remaining = RelOptUtil.splitJoinCondition(left, right, condition, leftKeys, rightKeys);
-    if (!remaining.isAlwaysTrue() && (leftKeys.size() == 0 || rightKeys.size() == 0)) {
-      throw new InvalidRelException("DrillJoinRel only supports equi-join");
-    }
+    assert traits.contains(DrillRel.DRILL_LOGICAL);
+    RelOptUtil.splitJoinCondition(left, right, condition, leftKeys, rightKeys);
   }
 
   public DrillJoinRel(RelOptCluster cluster, RelTraitSet traits, RelNode left, RelNode right, RexNode condition,
-      JoinRelType joinType, List<Integer> leftKeys, List<Integer> rightKeys, boolean checkCartesian) throws InvalidRelException {
+      JoinRelType joinType, List<Integer> leftKeys, List<Integer> rightKeys) throws InvalidRelException {
     super(cluster, traits, left, right, condition, joinType);
+    assert traits.contains(DrillRel.DRILL_LOGICAL);
 
     assert (leftKeys != null && rightKeys != null);
-
-    if (checkCartesian)  {
-      List<Integer> tmpLeftKeys = Lists.newArrayList();
-      List<Integer> tmpRightKeys = Lists.newArrayList();
-      RexNode remaining = RelOptUtil.splitJoinCondition(left, right, condition, tmpLeftKeys, tmpRightKeys);
-      if (!remaining.isAlwaysTrue() && (tmpLeftKeys.size() == 0 || tmpRightKeys.size() == 0)) {
-        throw new InvalidRelException("DrillJoinRel only supports equi-join");
-      }
-    }
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
   }
@@ -78,11 +68,7 @@ public class DrillJoinRel extends DrillJoinRelBase implements DrillRel {
 
   @Override
   public DrillJoinRel copy(RelTraitSet traitSet, RexNode condition, RelNode left, RelNode right, JoinRelType joinType, boolean semiJoinDone) {
-    try {
-      return new DrillJoinRel(getCluster(), traitSet, left, right, condition, joinType);
-    } catch (InvalidRelException e) {
-      throw new AssertionError(e);
-    }
+    return new DrillJoinRel(getCluster(), traitSet, left, right, condition, joinType);
   }
 
   @Override
@@ -149,8 +135,8 @@ public class DrillJoinRel extends DrillJoinRelBase implements DrillRel {
     // right fields appear after the LHS fields.
     final int rightInputOffset = left.getRowType().getFieldCount();
     for (JoinCondition condition : join.getConditions()) {
-      RelDataTypeField leftField = left.getRowType().getField(ExprHelper.getFieldName(condition.getLeft()), true);
-      RelDataTypeField rightField = right.getRowType().getField(ExprHelper.getFieldName(condition.getRight()), true);
+      RelDataTypeField leftField = left.getRowType().getField(ExprHelper.getFieldName(condition.getLeft()), true, false);
+      RelDataTypeField rightField = right.getRowType().getField(ExprHelper.getFieldName(condition.getRight()), true, false);
         joinConditions.add(
             context.getRexBuilder().makeCall(
                 SqlStdOperatorTable.EQUALS,

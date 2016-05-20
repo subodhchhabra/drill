@@ -78,12 +78,26 @@ fi
 . "${DRILL_CONF_DIR}/drill-env.sh"
 
 # get log directory
-if [ "$DRILL_LOG_DIR" = "" ]; then
-  DRILL_LOG_DIR=/var/log/drill
+if [ "x${DRILL_LOG_DIR}" = "x" ]; then
+  export DRILL_LOG_DIR=/var/log/drill
 fi
 
-if [ ! -d $DRILL_LOG_DIR ]; then
-  echo "Drill log directory $DRILL_LOG_DIR does not exist, defaulting to $DRILL_HOME/log"
+touch "$DRILL_LOG_DIR/sqlline.log" &> /dev/null
+TOUCH_EXIT_CODE=$?
+if [ "$TOUCH_EXIT_CODE" = "0" ]; then
+  if [ "x$DRILL_LOG_DEBUG" = "x1" ]; then
+    echo "Drill log directory: $DRILL_LOG_DIR"
+  fi
+  DRILL_LOG_DIR_FALLBACK=0
+else
+  #Force DRILL_LOG_DIR to fall back
+  DRILL_LOG_DIR_FALLBACK=1
+fi
+
+if [ ! -d "$DRILL_LOG_DIR" ] || [ "$DRILL_LOG_DIR_FALLBACK" = "1" ]; then
+  if [ "x$DRILL_LOG_DEBUG" = "x1" ]; then
+    echo "Drill log directory $DRILL_LOG_DIR does not exist or is not writable, defaulting to $DRILL_HOME/log"
+  fi
   DRILL_LOG_DIR=$DRILL_HOME/log
   mkdir -p $DRILL_LOG_DIR
 fi
@@ -182,6 +196,13 @@ if $is_cygwin; then
     HADOOP_HOME=${DRILL_HOME}/winutils
   fi
 fi
+
+# make sure allocator chunks are done as mmap'd memory (and reduce arena overhead)
+export MALLOC_ARENA_MAX=4
+export MALLOC_MMAP_THRESHOLD_=131072
+export MALLOC_TRIM_THRESHOLD_=131072
+export MALLOC_TOP_PAD_=131072
+export MALLOC_MMAP_MAX_=65536
 
 # Variables exported form this script
 export HADOOP_HOME

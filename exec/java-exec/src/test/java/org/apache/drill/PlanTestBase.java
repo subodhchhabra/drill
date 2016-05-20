@@ -18,8 +18,7 @@
 
 package org.apache.drill;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
@@ -28,17 +27,15 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.drill.common.expression.SchemaPath;
-import org.apache.drill.common.util.TestTools;
 import org.apache.drill.exec.record.RecordBatchLoader;
 import org.apache.drill.exec.record.VectorWrapper;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.vector.NullableVarCharVector;
 import org.apache.drill.exec.vector.ValueVector;
-import org.eigenbase.sql.SqlExplain.Depth;
-import org.eigenbase.sql.SqlExplainLevel;
+import org.apache.calcite.sql.SqlExplain.Depth;
+import org.apache.calcite.sql.SqlExplainLevel;
 
 import com.google.common.base.Strings;
-import org.junit.Test;
 
 public class PlanTestBase extends BaseTestQuery {
 
@@ -54,14 +51,15 @@ public class PlanTestBase extends BaseTestQuery {
    * format. Then check the physical plan against the list expected substrs.
    * Verify all the expected strings are contained in the physical plan string.
    */
-  public void testPhysicalPlan(String sql, String... expectedSubstrs)
+  public static void testPhysicalPlan(String sql, String... expectedSubstrs)
       throws Exception {
-    sql = "EXPLAIN PLAN for " + normalizeQuery(sql);
+    sql = "EXPLAIN PLAN for " + QueryTestUtil.normalizeQuery(sql);
 
-    String planStr = getPlanInString(sql, JSON_FORMAT);
+    final String planStr = getPlanInString(sql, JSON_FORMAT);
 
-    for (String colNames : expectedSubstrs) {
-      assertTrue(String.format("Unable to find expected string %s in plan: %s!", colNames, planStr), planStr.contains(colNames));
+    for (final String colNames : expectedSubstrs) {
+      assertTrue(String.format("Unable to find expected string %s in plan: %s!", colNames, planStr),
+          planStr.contains(colNames));
     }
   }
 
@@ -79,26 +77,25 @@ public class PlanTestBase extends BaseTestQuery {
    * @throws Exception - if an inclusion or exclusion check fails, or the
    *                     planning process throws an exception
    */
-  public void testPlanMatchingPatterns(String query, String[] expectedPatterns, String[] excludedPatterns) throws Exception {
-    String plan = getPlanInString("EXPLAIN PLAN for " + normalizeQuery(query), OPTIQ_FORMAT);
+  public static void testPlanMatchingPatterns(String query, String[] expectedPatterns, String[] excludedPatterns)
+      throws Exception {
+    final String plan = getPlanInString("EXPLAIN PLAN for " + QueryTestUtil.normalizeQuery(query), OPTIQ_FORMAT);
 
-    Pattern p;
-    Matcher m;
     // Check and make sure all expected patterns are in the plan
     if (expectedPatterns != null) {
-      for (String s : expectedPatterns) {
-        p = Pattern.compile(s);
-        m = p.matcher(plan);
-        assert m.find() : EXPECTED_NOT_FOUND + s;
+      for (final String s : expectedPatterns) {
+        final Pattern p = Pattern.compile(s);
+        final Matcher m = p.matcher(plan);
+        assertTrue(EXPECTED_NOT_FOUND + s, m.find());
       }
     }
 
     // Check and make sure all excluded patterns are not in the plan
     if (excludedPatterns != null) {
-      for (String s : excludedPatterns) {
-        p = Pattern.compile(s);
-        m = p.matcher(plan);
-        assert ! m.find() : UNEXPECTED_FOUND + s;
+      for (final String s : excludedPatterns) {
+        final Pattern p = Pattern.compile(s);
+        final Matcher m = p.matcher(plan);
+        assertFalse(UNEXPECTED_FOUND + s, m.find());
       }
     }
   }
@@ -121,33 +118,35 @@ public class PlanTestBase extends BaseTestQuery {
    * @throws Exception - if an inclusion or exclusion check fails, or the
    *                     planning process throws an exception
    */
-  public void testPlanSubstrPatterns(String query, String[] expectedPatterns, String[] excludedPatterns) throws Exception {
-    String plan = getPlanInString("EXPLAIN PLAN for " + normalizeQuery(query), OPTIQ_FORMAT);
+  public static void testPlanSubstrPatterns(String query, String[] expectedPatterns, String[] excludedPatterns)
+      throws Exception {
+    final String plan = getPlanInString("EXPLAIN PLAN for " + QueryTestUtil.normalizeQuery(query), OPTIQ_FORMAT);
 
     // Check and make sure all expected patterns are in the plan
     if (expectedPatterns != null) {
-      for (String s : expectedPatterns) {
-        assert plan.contains(s) : EXPECTED_NOT_FOUND + s;
+      for (final String s : expectedPatterns) {
+        assertTrue(EXPECTED_NOT_FOUND + s, plan.contains(s));
       }
     }
 
     // Check and make sure all excluded patterns are not in the plan
     if (excludedPatterns != null) {
-      for (String s : excludedPatterns) {
-        assert ! plan.contains(s) : UNEXPECTED_FOUND + s;
+      for (final String s : excludedPatterns) {
+        assertFalse(UNEXPECTED_FOUND + s, plan.contains(s));
       }
     }
   }
 
-  public void testPlanOneExpectedPatternOneExcluded(String query, String expectedPattern, String excludedPattern) throws Exception {
+  public static void testPlanOneExpectedPatternOneExcluded(
+      String query, String expectedPattern, String excludedPattern) throws Exception {
     testPlanMatchingPatterns(query, new String[]{expectedPattern}, new String[]{excludedPattern});
   }
 
-  public void testPlanOneExpectedPattern(String query, String expectedPattern) throws Exception {
+  public static void testPlanOneExpectedPattern(String query, String expectedPattern) throws Exception {
     testPlanMatchingPatterns(query, new String[]{expectedPattern}, new String[]{});
   }
 
-  public void testPlanOneExcludedPattern(String query, String excludedPattern) throws Exception {
+  public static void testPlanOneExcludedPattern(String query, String excludedPattern) throws Exception {
     testPlanMatchingPatterns(query, new String[]{}, new String[]{excludedPattern});
   }
 
@@ -157,13 +156,13 @@ public class PlanTestBase extends BaseTestQuery {
    * substrs. Verify all the expected strings are contained in the physical plan
    * string.
    */
-  public void testRelLogicalJoinOrder(String sql, String... expectedSubstrs) throws Exception {
-    String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.LOGICAL);
-
-    String prefixJoinOrder = getLogicalPrefixJoinOrderFromPlan(planStr);
+  public static void testRelLogicalJoinOrder(String sql, String... expectedSubstrs) throws Exception {
+    final String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.LOGICAL);
+    final String prefixJoinOrder = getLogicalPrefixJoinOrderFromPlan(planStr);
     System.out.println(" prefix Join order = \n" + prefixJoinOrder);
-    for (String substr : expectedSubstrs) {
-      assertTrue(String.format("Expected string %s is not in the prefixJoinOrder %s!", substr, prefixJoinOrder), prefixJoinOrder.contains(substr));
+    for (final String substr : expectedSubstrs) {
+      assertTrue(String.format("Expected string %s is not in the prefixJoinOrder %s!", substr, prefixJoinOrder),
+          prefixJoinOrder.contains(substr));
     }
   }
 
@@ -173,13 +172,13 @@ public class PlanTestBase extends BaseTestQuery {
    * substrs. Verify all the expected strings are contained in the physical plan
    * string.
    */
-  public void testRelPhysicalJoinOrder(String sql, String... expectedSubstrs) throws Exception {
-    String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.PHYSICAL);
-
-    String prefixJoinOrder = getPhysicalPrefixJoinOrderFromPlan(planStr);
+  public static void testRelPhysicalJoinOrder(String sql, String... expectedSubstrs) throws Exception {
+    final String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.PHYSICAL);
+    final String prefixJoinOrder = getPhysicalPrefixJoinOrderFromPlan(planStr);
     System.out.println(" prefix Join order = \n" + prefixJoinOrder);
-    for (String substr : expectedSubstrs) {
-      assertTrue(String.format("Expected string %s is not in the prefixJoinOrder %s!", substr, prefixJoinOrder), prefixJoinOrder.contains(substr));
+    for (final String substr : expectedSubstrs) {
+      assertTrue(String.format("Expected string %s is not in the prefixJoinOrder %s!", substr, prefixJoinOrder),
+          prefixJoinOrder.contains(substr));
     }
   }
 
@@ -189,11 +188,10 @@ public class PlanTestBase extends BaseTestQuery {
    * expected substrs. Verify all the expected strings are contained in the
    * physical plan string.
    */
-  public void testRelPhysicalPlanLevDigest(String sql, String... expectedSubstrs)
+  public static void testRelPhysicalPlanLevDigest(String sql, String... expectedSubstrs)
       throws Exception {
-    String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.DIGEST_ATTRIBUTES, Depth.PHYSICAL);
-
-    for (String substr : expectedSubstrs) {
+    final String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.DIGEST_ATTRIBUTES, Depth.PHYSICAL);
+    for (final String substr : expectedSubstrs) {
       assertTrue(planStr.contains(substr));
     }
   }
@@ -204,12 +202,12 @@ public class PlanTestBase extends BaseTestQuery {
    * substrs. Verify all the expected strings are contained in the physical plan
    * string.
    */
-  public void testRelLogicalPlanLevDigest(String sql, String... expectedSubstrs)
+  public static void testRelLogicalPlanLevDigest(String sql, String... expectedSubstrs)
       throws Exception {
-    String planStr = getDrillRelPlanInString(sql,
+    final String planStr = getDrillRelPlanInString(sql,
         SqlExplainLevel.DIGEST_ATTRIBUTES, Depth.LOGICAL);
 
-    for (String substr : expectedSubstrs) {
+    for (final String substr : expectedSubstrs) {
       assertTrue(planStr.contains(substr));
     }
   }
@@ -220,10 +218,10 @@ public class PlanTestBase extends BaseTestQuery {
    * expected substrs. Verify all the expected strings are contained in the
    * physical plan string.
    */
-  public void testRelPhysicalPlanLevExplain(String sql, String... expectedSubstrs) throws Exception {
-    String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.PHYSICAL);
+  public static void testRelPhysicalPlanLevExplain(String sql, String... expectedSubstrs) throws Exception {
+    final String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.PHYSICAL);
 
-    for (String substr : expectedSubstrs) {
+    for (final String substr : expectedSubstrs) {
       assertTrue(planStr.contains(substr));
     }
   }
@@ -234,10 +232,10 @@ public class PlanTestBase extends BaseTestQuery {
    * substrs. Verify all the expected strings are contained in the physical plan
    * string.
    */
-  public void testRelLogicalPlanLevExplain(String sql, String... expectedSubstrs) throws Exception {
-    String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.LOGICAL);
+  public static void testRelLogicalPlanLevExplain(String sql, String... expectedSubstrs) throws Exception {
+    final String planStr = getDrillRelPlanInString(sql, SqlExplainLevel.EXPPLAN_ATTRIBUTES, Depth.LOGICAL);
 
-    for (String substr : expectedSubstrs) {
+    for (final String substr : expectedSubstrs) {
       assertTrue(planStr.contains(substr));
     }
   }
@@ -246,7 +244,7 @@ public class PlanTestBase extends BaseTestQuery {
    * This will get the plan (either logical or physical) in Optiq RelNode
    * format, based on SqlExplainLevel and Depth.
    */
-  private String getDrillRelPlanInString(String sql, SqlExplainLevel level,
+  private static String getDrillRelPlanInString(String sql, SqlExplainLevel level,
       Depth depth) throws Exception {
     String levelStr = " ", depthStr = " ";
 
@@ -279,7 +277,7 @@ public class PlanTestBase extends BaseTestQuery {
     }
 
     sql = "EXPLAIN PLAN " + levelStr + " " + depthStr + "  for "
-        + normalizeQuery(sql);
+        + QueryTestUtil.normalizeQuery(sql);
 
     return getPlanInString(sql, OPTIQ_FORMAT);
   }
@@ -290,34 +288,37 @@ public class PlanTestBase extends BaseTestQuery {
    */
   protected static String getPlanInString(String sql, String columnName)
       throws Exception {
-    List<QueryResultBatch> results = testSqlWithResults(sql);
+    final List<QueryDataBatch> results = testSqlWithResults(sql);
+    final RecordBatchLoader loader = new RecordBatchLoader(getDrillbitContext().getAllocator());
+    final StringBuilder builder = new StringBuilder();
+    final boolean silent = config != null && config.getBoolean(QueryTestUtil.TEST_QUERY_PRINTING_SILENT);
 
-    RecordBatchLoader loader = new RecordBatchLoader(getDrillbitContext().getAllocator());
-    StringBuilder builder = new StringBuilder();
-
-    for (QueryResultBatch b : results) {
+    for (final QueryDataBatch b : results) {
       if (!b.hasData()) {
         continue;
       }
 
       loader.load(b.getHeader().getDef(), b.getData());
 
-      VectorWrapper<?> vw;
+      final VectorWrapper<?> vw;
       try {
           vw = loader.getValueAccessorById(
-              NullableVarCharVector.class, //
-              loader.getValueVectorId(SchemaPath.getSimplePath(columnName)).getFieldIds() //
-              );
+              NullableVarCharVector.class,
+              loader.getValueVectorId(SchemaPath.getSimplePath(columnName)).getFieldIds());
       } catch (Throwable t) {
         throw new Exception("Looks like you did not provide an explain plan query, please add EXPLAIN PLAN FOR to the beginning of your query.");
       }
 
-      System.out.println(vw.getValueVector().getField().toExpr());
-      ValueVector vv = vw.getValueVector();
+      if (!silent) {
+        System.out.println(vw.getValueVector().getField().getPath());
+      }
+      final ValueVector vv = vw.getValueVector();
       for (int i = 0; i < vv.getAccessor().getValueCount(); i++) {
-        Object o = vv.getAccessor().getObject(i);
+        final Object o = vv.getAccessor().getObject(i);
         builder.append(o);
-        System.out.println(vv.getAccessor().getObject(i));
+        if (!silent) {
+          System.out.println(o);
+        }
       }
       loader.clear();
       b.release();
@@ -326,24 +327,21 @@ public class PlanTestBase extends BaseTestQuery {
     return builder.toString();
   }
 
-  private String getLogicalPrefixJoinOrderFromPlan(String plan) {
+  private static String getLogicalPrefixJoinOrderFromPlan(String plan) {
     return getPrefixJoinOrderFromPlan(plan, "DrillJoinRel", "DrillScanRel");
-
   }
 
-  private String getPhysicalPrefixJoinOrderFromPlan(String plan) {
+  private static String getPhysicalPrefixJoinOrderFromPlan(String plan) {
     return getPrefixJoinOrderFromPlan(plan, "JoinPrel", "ScanPrel");
   }
 
-  private String getPrefixJoinOrderFromPlan(String plan, String joinKeyWord, String scanKeyWord) {
-    StringBuilder builder = new StringBuilder();
-
-    String[] planLines = plan.split("\n");
+  private static String getPrefixJoinOrderFromPlan(String plan, String joinKeyWord, String scanKeyWord) {
+    final StringBuilder builder = new StringBuilder();
+    final String[] planLines = plan.split("\n");
     int cnt = 0;
+    final Stack<Integer> s = new Stack<>();
 
-    Stack<Integer> s = new Stack<Integer>();
-
-    for (String line : planLines) {
+    for (final String line : planLines) {
       if (line.trim().isEmpty()) {
         continue;
       }
@@ -369,5 +367,4 @@ public class PlanTestBase extends BaseTestQuery {
 
     return builder.toString();
   }
-
 }

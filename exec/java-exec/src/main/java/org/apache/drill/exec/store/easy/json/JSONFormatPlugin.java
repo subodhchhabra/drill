@@ -25,39 +25,43 @@ import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.logical.FormatPluginConfig;
 import org.apache.drill.common.logical.StoragePluginConfig;
+import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
 import org.apache.drill.exec.proto.UserBitShared.CoreOperatorType;
 import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.store.RecordReader;
 import org.apache.drill.exec.store.RecordWriter;
+import org.apache.drill.exec.store.dfs.DrillFileSystem;
 import org.apache.drill.exec.store.dfs.FileSystemConfig;
 import org.apache.drill.exec.store.dfs.easy.EasyFormatPlugin;
 import org.apache.drill.exec.store.dfs.easy.EasyWriter;
 import org.apache.drill.exec.store.dfs.easy.FileWork;
-import org.apache.drill.exec.store.dfs.DrillFileSystem;
 import org.apache.drill.exec.store.easy.json.JSONFormatPlugin.JSONFormatConfig;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonTypeName;
-import com.google.common.collect.Lists;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 
 public class JSONFormatPlugin extends EasyFormatPlugin<JSONFormatConfig> {
 
   private static final boolean IS_COMPRESSIBLE = true;
+  private static final String DEFAULT_NAME = "json";
 
-  public JSONFormatPlugin(String name, DrillbitContext context, DrillFileSystem fs, StoragePluginConfig storageConfig) {
-    this(name, context, fs, storageConfig, new JSONFormatConfig());
+  public JSONFormatPlugin(String name, DrillbitContext context, Configuration fsConf, StoragePluginConfig storageConfig) {
+    this(name, context, fsConf, storageConfig, new JSONFormatConfig());
   }
 
-  public JSONFormatPlugin(String name, DrillbitContext context, DrillFileSystem fs, StoragePluginConfig config, JSONFormatConfig formatPluginConfig) {
-    super(name, context, fs, config, formatPluginConfig, true, false, false, IS_COMPRESSIBLE, Lists.newArrayList("json"), "json");
+  public JSONFormatPlugin(String name, DrillbitContext context, Configuration fsConf, StoragePluginConfig config, JSONFormatConfig formatPluginConfig) {
+    super(name, context, fsConf, config, formatPluginConfig, true, false, false, IS_COMPRESSIBLE, formatPluginConfig.getExtensions(), DEFAULT_NAME);
   }
 
   @Override
   public RecordReader getRecordReader(FragmentContext context, DrillFileSystem dfs, FileWork fileWork,
-      List<SchemaPath> columns) throws ExecutionSetupException {
+      List<SchemaPath> columns, String userName) throws ExecutionSetupException {
     return new JSONRecordReader(context, fileWork.getPath(), dfs, columns);
   }
 
@@ -75,6 +79,8 @@ public class JSONFormatPlugin extends EasyFormatPlugin<JSONFormatConfig> {
     options.put(FileSystem.FS_DEFAULT_NAME_KEY, ((FileSystemConfig)writer.getStorageConfig()).connection);
 
     options.put("extension", "json");
+    options.put("extended", Boolean.toString(context.getOptions().getOption(ExecConstants.JSON_EXTENDED_TYPES)));
+    options.put("uglify", Boolean.toString(context.getOptions().getOption(ExecConstants.JSON_WRITER_UGLIFY)));
 
     RecordWriter recordWriter = new JsonRecordWriter();
     recordWriter.init(options);
@@ -85,22 +91,48 @@ public class JSONFormatPlugin extends EasyFormatPlugin<JSONFormatConfig> {
   @JsonTypeName("json")
   public static class JSONFormatConfig implements FormatPluginConfig {
 
+    public List<String> extensions = ImmutableList.of("json");
+    private static final List<String> DEFAULT_EXTS = ImmutableList.of("json");
+
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public List<String> getExtensions() {
+      if (extensions == null) {
+        // when loading an old JSONFormatConfig that doesn't contain an "extensions" attribute
+        return DEFAULT_EXTS;
+      }
+      return extensions;
+    }
+
     @Override
     public int hashCode() {
-      return 31;
+      final int prime = 31;
+      int result = 1;
+      result = prime * result + ((extensions == null) ? 0 : extensions.hashCode());
+      return result;
     }
 
     @Override
     public boolean equals(Object obj) {
       if (this == obj) {
         return true;
-      } else if (obj == null) {
-        return false;
-      } else if (getClass() == obj.getClass()) {
-        return true;
       }
-      return false;
+      if (obj == null) {
+        return false;
+      }
+      if (getClass() != obj.getClass()) {
+        return false;
+      }
+      JSONFormatConfig other = (JSONFormatConfig) obj;
+      if (extensions == null) {
+        if (other.extensions != null) {
+          return false;
+        }
+      } else if (!extensions.equals(other.extensions)) {
+        return false;
+      }
+      return true;
     }
+
 
   }
 

@@ -17,7 +17,6 @@
  */
 package org.apache.drill.exec.planner.fragment;
 
-
 import org.apache.drill.exec.physical.EndpointAffinity;
 import org.apache.drill.exec.planner.fragment.ParallelizationInfo.ParallelizationInfoCollector;
 
@@ -26,6 +25,7 @@ import java.util.List;
 public class Stats {
   private final ParallelizationInfoCollector collector = new ParallelizationInfoCollector();
   private double maxCost = 0.0;
+  private DistributionAffinity distributionAffinity = DistributionAffinity.NONE;
 
   public void addParallelizationInfo(ParallelizationInfo parallelizationInfo) {
     collector.add(parallelizationInfo);
@@ -37,6 +37,16 @@ public class Stats {
 
   public void addMaxWidth(int maxWidth) {
     collector.addMaxWidth(maxWidth);
+  }
+
+  public void addMinWidth(int minWidth) {
+    collector.addMinWidth(minWidth);
+  }
+
+  public void setDistributionAffinity(final DistributionAffinity distributionAffinity) {
+    if (this.distributionAffinity.isLessRestrictiveThan(distributionAffinity)) {
+      this.distributionAffinity = distributionAffinity;
+    }
   }
 
   public void addEndpointAffinities(List<EndpointAffinity> endpointAffinityList) {
@@ -54,5 +64,9 @@ public class Stats {
 
   public double getMaxCost() {
     return maxCost;
+  }
+
+  public DistributionAffinity getDistributionAffinity() {
+    return distributionAffinity;
   }
 }

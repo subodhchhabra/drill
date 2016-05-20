@@ -17,6 +17,8 @@
  */
 package org.apache.drill.exec.physical.impl;
 
+import static org.apache.drill.TestBuilder.listOf;
+import static org.apache.drill.TestBuilder.mapOf;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -30,24 +32,35 @@ import java.util.List;
 import mockit.Injectable;
 
 import org.apache.drill.BaseTestQuery;
+import org.apache.drill.TestBuilder;
+import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.compile.ClassTransformer;
+import org.apache.drill.exec.compile.ClassTransformer.ScalarReplacementOption;
 import org.apache.drill.exec.expr.fn.impl.DateUtility;
 import org.apache.drill.exec.proto.UserBitShared.QueryType;
 import org.apache.drill.exec.record.RecordBatchLoader;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.RpcException;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.rpc.user.UserServer;
+import org.apache.drill.exec.server.Drillbit;
 import org.apache.drill.exec.server.DrillbitContext;
+import org.apache.drill.exec.server.options.OptionManager;
+import org.apache.drill.exec.server.options.OptionValue;
+import org.apache.drill.exec.server.options.OptionValue.OptionType;
 import org.apache.drill.exec.util.ByteBufUtil.HadoopWritables;
 import org.apache.drill.exec.util.VectorUtil;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.VarCharVector;
 import org.joda.time.DateTime;
+import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import com.google.common.base.Charsets;
 import com.google.common.io.Resources;
 
 public class TestConvertFunctions extends BaseTestQuery {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestConvertFunctions.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestConvertFunctions.class);
 
   private static final String CONVERSION_TEST_LOGICAL_PLAN = "functions/conv/conversionTestWithLogicalPlan.json";
   private static final String CONVERSION_TEST_PHYSICAL_PLAN = "functions/conv/conversionTestWithPhysicalPlan.json";
@@ -63,11 +76,98 @@ public class TestConvertFunctions extends BaseTestQuery {
 
   String textFileContent;
 
+  @Test // DRILL-3854
+  public void testConvertFromConvertToInt() throws Exception {
+    final OptionValue srOption = setupScalarReplacementOption(bits[0], ScalarReplacementOption.OFF);
+    try {
+      final String newTblName = "testConvertFromConvertToInt_tbl";
+      final String ctasQuery = String.format("CREATE TABLE %s.%s as \n" +
+          "SELECT convert_to(r_regionkey, 'INT') as ct \n" +
+          "FROM cp.`tpch/region.parquet`",
+          TEMP_SCHEMA, newTblName);
+      final String query = String.format("SELECT convert_from(ct, 'INT') as cf \n" +
+          "FROM %s.%s \n" +
+          "ORDER BY ct",
+          TEMP_SCHEMA, newTblName);
+
+      test("alter session set `planner.slice_target` = 1");
+      test(ctasQuery);
+      testBuilder()
+          .sqlQuery(query)
+          .ordered()
+          .baselineColumns("cf")
+          .baselineValues(0)
+          .baselineValues(1)
+          .baselineValues(2)
+          .baselineValues(3)
+          .baselineValues(4)
+          .build()
+          .run();
+    } finally {
+      // restore the system option
+      restoreScalarReplacementOption(bits[0], srOption);
+      test("alter session set `planner.slice_target` = " + ExecConstants.SLICE_TARGET_DEFAULT);
+    }
+  }
+
   @Test
   public void test_JSON_convertTo_empty_list_drill_1416() throws Exception {
-    test("select cast(convert_to(rl[1], 'JSON') as varchar(100)) from cp.`/store/json/input2.json`");
-    test("select convert_from(convert_to(rl[1], 'JSON'), 'JSON') from cp.`/store/json/input2.json`");
-    test("select convert_from(convert_to(rl[1], 'JSON'), 'JSON') from cp.`/store/json/json_project_null_object_from_list.json`");
+
+    String listStr = "[ 4, 6 ]";
+    testBuilder()
+        .sqlQuery("select cast(convert_to(rl[1], 'JSON') as varchar(100)) as json_str from cp.`/store/json/input2.json`")
+        .unOrdered()
+        .baselineColumns("json_str")
+        .baselineValues(listStr)
+        .baselineValues("[ ]")
+        .baselineValues(listStr)
+        .baselineValues(listStr)
+        .go();
+
+    Object listVal = listOf(4l, 6l);
+    testBuilder()
+        .sqlQuery("select convert_from(convert_to(rl[1], 'JSON'), 'JSON') list_col from cp.`/store/json/input2.json`")
+        .unOrdered()
+        .baselineColumns("list_col")
+        .baselineValues(listVal)
+        .baselineValues(listOf())
+        .baselineValues(listVal)
+        .baselineValues(listVal)
+        .go();
+
+    Object mapVal1 = mapOf("f1", 4l, "f2", 6l);
+    Object mapVal2 = mapOf("f1", 11l);
+    testBuilder()
+        .sqlQuery("select convert_from(convert_to(rl[1], 'JSON'), 'JSON') as map_col from cp.`/store/json/json_project_null_object_from_list.json`")
+        .unOrdered()
+        .baselineColumns("map_col")
+        .baselineValues(mapVal1)
+        .baselineValues(mapOf())
+        .baselineValues(mapVal2)
+        .baselineValues(mapVal1)
+        .go();
+  }
+
+  @Test
+  public void testConvertToComplexJSON() throws Exception {
+
+    String result1 =
+        "[ {\n" +
+            "  \"$numberLong\" : 4\n" +
+            "}, {\n" +
+            "  \"$numberLong\" : 6\n" +
+            "} ]";
+    String result2 = "[ ]";
+
+    testBuilder()
+        .sqlQuery("select cast(convert_to(rl[1], 'EXTENDEDJSON') as varchar(100)) as json_str from cp.`/store/json/input2.json`")
+        .unOrdered()
+        .baselineColumns("json_str")
+        .baselineValues(result1)
+        .baselineValues(result2)
+        .baselineValues(result1)
+        .baselineValues(result1)
+        .go();
   }
 
   @Test
@@ -318,13 +418,15 @@ public class TestConvertFunctions extends BaseTestQuery {
     verifyPhysicalPlan("convert_to('apache_drill', 'UTF8')", new byte[] {'a', 'p', 'a', 'c', 'h', 'e', '_', 'd', 'r', 'i', 'l', 'l'});
   }
 
+  @Ignore // TODO(DRILL-2326) remove this when we get rid of the scalar replacement option test cases below
   @Test
   public void testBigIntVarCharReturnTripConvertLogical() throws Exception {
-    String logicalPlan = Resources.toString(Resources.getResource(CONVERSION_TEST_LOGICAL_PLAN), Charsets.UTF_8);
-    List<QueryResultBatch> results =  testLogicalWithResults(logicalPlan);
+    final String logicalPlan = Resources.toString(
+        Resources.getResource(CONVERSION_TEST_LOGICAL_PLAN), Charsets.UTF_8);
+    final List<QueryDataBatch> results =  testLogicalWithResults(logicalPlan);
     int count = 0;
-    RecordBatchLoader loader = new RecordBatchLoader(getAllocator());
-    for (QueryResultBatch result : results){
+    final RecordBatchLoader loader = new RecordBatchLoader(getAllocator());
+    for (QueryDataBatch result : results) {
       count += result.getHeader().getRowCount();
       loader.load(result.getHeader().getDef(), result.getData());
       if (loader.getRecordCount() > 0) {
@@ -334,6 +436,97 @@ public class TestConvertFunctions extends BaseTestQuery {
       result.release();
     }
     assertTrue(count == 10);
+  }
+
+  /**
+   * Set up the options to test the scalar replacement retry option (see
+   * ClassTransformer.java). Scalar replacement rewrites bytecode to replace
+   * value holders (essentially boxed values) with their member variables as
+   * locals. There is still one pattern that doesn't work, and occasionally new
+   * ones are introduced. This can be used in tests that exercise failing patterns.
+   *
+   * <p>This also flushes the compiled code cache.
+   *
+   * <p>TODO this should get moved to QueryTestUtil once DRILL-2245 has been merged
+   *
+   * @param drillbit the drillbit
+   * @param srOption the scalar replacement option value to use
+   * @return the original scalar replacement option setting (so it can be restored)
+   */
+  private static OptionValue setupScalarReplacementOption(
+      final Drillbit drillbit, final ScalarReplacementOption srOption) {
+    // set the system option
+    final DrillbitContext drillbitContext = drillbit.getContext();
+    final OptionManager optionManager = drillbitContext.getOptionManager();
+    final OptionValue originalOptionValue = optionManager.getOption(ClassTransformer.SCALAR_REPLACEMENT_OPTION);
+    final OptionValue newOptionValue = OptionValue.createString(OptionType.SYSTEM,
+        ClassTransformer.SCALAR_REPLACEMENT_OPTION, srOption.name().toLowerCase());
+    optionManager.setOption(newOptionValue);
+
+    // flush the code cache
+    drillbitContext.getCompiler().flushCache();
+
+    return originalOptionValue;
+  }
+
+  /**
+   * Restore the original scalar replacement option returned from
+   * setupScalarReplacementOption().
+   *
+   * <p>This also flushes the compiled code cache.
+   *
+   * <p>TODO this should get moved to QueryTestUtil once DRILL-2245 has been merged
+   *
+   * @param drillbit the drillbit
+   * @param srOption the scalar replacement option value to use
+   */
+  private static void restoreScalarReplacementOption(final Drillbit drillbit, final OptionValue srOption) {
+    final DrillbitContext drillbitContext = drillbit.getContext();
+    final OptionManager optionManager = drillbitContext.getOptionManager();
+    optionManager.setOption(srOption);
+
+    // flush the code cache
+    drillbitContext.getCompiler().flushCache();
+  }
+
+  @Test // TODO(DRILL-2326) temporary until we fix the scalar replacement bug for this case
+  public void testBigIntVarCharReturnTripConvertLogical_ScalarReplaceTRY() throws Exception {
+    final OptionValue srOption = setupScalarReplacementOption(bits[0], ScalarReplacementOption.TRY);
+    try {
+      // this should work fine
+      testBigIntVarCharReturnTripConvertLogical();
+    } finally {
+      // restore the system option
+      restoreScalarReplacementOption(bits[0], srOption);
+    }
+  }
+
+  @Test // TODO(DRILL-2326) temporary until we fix the scalar replacement bug for this case
+  public void testBigIntVarCharReturnTripConvertLogical_ScalarReplaceON() throws Exception {
+    final OptionValue srOption = setupScalarReplacementOption(bits[0], ScalarReplacementOption.ON);
+    boolean caughtException = false;
+    try {
+      // this will fail (with a JUnit assertion) until we fix the SR bug
+      testBigIntVarCharReturnTripConvertLogical();
+    } catch(RpcException e) {
+      caughtException = true;
+    } finally {
+      restoreScalarReplacementOption(bits[0], srOption);
+    }
+
+    assertTrue(caughtException);
+  }
+
+  @Test // TODO(DRILL-2326) temporary until we fix the scalar replacement bug for this case
+  public void testBigIntVarCharReturnTripConvertLogical_ScalarReplaceOFF() throws Exception {
+    final OptionValue srOption = setupScalarReplacementOption(bits[0], ScalarReplacementOption.OFF);
+    try {
+      // this should work fine
+      testBigIntVarCharReturnTripConvertLogical();
+    } finally {
+      // restore the system option
+      restoreScalarReplacementOption(bits[0], srOption);
+    }
   }
 
   @Test
@@ -392,11 +585,11 @@ public class TestConvertFunctions extends BaseTestQuery {
   }
 
   protected Object[] getRunResult(QueryType queryType, String planString) throws Exception {
-    List<QueryResultBatch> resultList = testRunAndReturn(queryType, planString);
+    List<QueryDataBatch> resultList = testRunAndReturn(queryType, planString);
 
     List<Object> res = new ArrayList<Object>();
     RecordBatchLoader loader = new RecordBatchLoader(getAllocator());
-    for(QueryResultBatch result : resultList) {
+    for(QueryDataBatch result : resultList) {
       if (result.getData() != null) {
         loader.load(result.getHeader().getDef(), result.getData());
         ValueVector v = loader.iterator().next().getValueVector();

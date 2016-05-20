@@ -25,22 +25,31 @@ import org.apache.drill.exec.physical.impl.BatchCreator;
 import org.apache.drill.exec.physical.impl.ScanBatch;
 import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.store.RecordReader;
+import org.apache.drill.exec.util.ImpersonationUtil;
+import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.hadoop.mapred.InputSplit;
 
 import com.google.common.collect.Lists;
+import org.apache.hadoop.security.UserGroupInformation;
 
+@SuppressWarnings("unused")
 public class HiveScanBatchCreator implements BatchCreator<HiveSubScan> {
 
   @Override
-  public RecordBatch getBatch(FragmentContext context, HiveSubScan config, List<RecordBatch> children) throws ExecutionSetupException {
+  public ScanBatch getBatch(FragmentContext context, HiveSubScan config, List<RecordBatch> children)
+      throws ExecutionSetupException {
     List<RecordReader> readers = Lists.newArrayList();
     Table table = config.getTable();
     List<InputSplit> splits = config.getInputSplits();
     List<Partition> partitions = config.getPartitions();
     boolean hasPartitions = (partitions != null && partitions.size() > 0);
     int i = 0;
+    final UserGroupInformation proxyUgi = ImpersonationUtil.createProxyUgi(config.getUserName(),
+      context.getQueryUserName());
+
+    final HiveConf hiveConf = config.getHiveConf();
 
     // Native hive text record reader doesn't handle all types currently. For now use HiveRecordReader which uses
     // Hive InputFormat and SerDe classes to read the data.
@@ -55,16 +64,14 @@ public class HiveScanBatchCreator implements BatchCreator<HiveSubScan> {
     //} else {
       for (InputSplit split : splits) {
         readers.add(new HiveRecordReader(table,
-            (hasPartitions ? partitions.get(i++) : null),
-            split, config.getColumns(), context, config.getHiveReadEntry().hiveConfigOverride));
+            (hasPartitions ? partitions.get(i++) : null), split, config.getColumns(), context, hiveConf, proxyUgi));
       }
     //}
 
     // If there are no readers created (which is possible when the table is empty), create an empty RecordReader to
     // output the schema
     if (readers.size() == 0) {
-      readers.add(new HiveRecordReader(table, null, null, config.getColumns(), context,
-          config.getHiveReadEntry().hiveConfigOverride));
+      readers.add(new HiveRecordReader(table, null, null, config.getColumns(), context, hiveConf, proxyUgi));
     }
 
     return new ScanBatch(config, context, readers.iterator());

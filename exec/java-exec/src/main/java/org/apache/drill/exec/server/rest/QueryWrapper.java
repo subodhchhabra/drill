@@ -29,28 +29,27 @@ import javax.xml.bind.annotation.XmlRootElement;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.drill.common.config.DrillConfig;
+
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.exec.client.DrillClient;
-import org.apache.drill.exec.coord.ClusterCoordinator;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.proto.UserBitShared;
+import org.apache.drill.exec.proto.UserBitShared.QueryResult.QueryState;
 import org.apache.drill.exec.record.RecordBatchLoader;
 import org.apache.drill.exec.record.VectorWrapper;
-import org.apache.drill.exec.rpc.RpcException;
-import org.apache.drill.exec.rpc.user.ConnectionThrottle;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.ConnectionThrottle;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.rpc.user.UserResultsListener;
 import org.apache.drill.exec.vector.ValueVector;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import parquet.Preconditions;
+import com.google.common.base.Preconditions;
 
 @XmlRootElement
 public class QueryWrapper {
-
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(QueryWrapper.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(QueryWrapper.class);
 
   private String query;
   private String queryType;
@@ -79,27 +78,22 @@ public class QueryWrapper {
     return type;
   }
 
-  public QueryResult run(DrillConfig config, ClusterCoordinator coordinator, BufferAllocator allocator)
-    throws Exception {
-    try(DrillClient client = new DrillClient(config, coordinator, allocator)){
-      Listener listener = new Listener(allocator);
-
-      client.connect();
-      client.runQuery(getType(), query, listener);
-
-      listener.waitForCompletion();
-      if (listener.results.isEmpty()) {
-        listener.results.add(Maps.<String, String>newHashMap());
-      }
-      final Map<String, String> first = listener.results.get(0);
-      for (String columnName : listener.columns) {
-        if (!first.containsKey(columnName)) {
-          first.put(columnName, null);
-        }
-      }
-
-      return new QueryResult(listener.columns, listener.results);
+  public QueryResult run(final DrillClient client, final BufferAllocator allocator) throws Exception {
+    Listener listener = new Listener(allocator);
+    client.runQuery(getType(), query, listener);
+    listener.waitForCompletion();
+    if (listener.results.isEmpty()) {
+      listener.results.add(Maps.<String, String>newHashMap());
     }
+
+    final Map<String, String> first = listener.results.get(0);
+    for (String columnName : listener.columns) {
+      if (!first.containsKey(columnName)) {
+        first.put(columnName, null);
+      }
+    }
+
+    return new QueryResult(listener.columns, listener.results);
   }
 
   public static class QueryResult {
@@ -119,7 +113,7 @@ public class QueryWrapper {
 
 
   private static class Listener implements UserResultsListener {
-    private volatile Exception exception;
+    private volatile UserException exception;
     private final CountDownLatch latch = new CountDownLatch(1);
     private final BufferAllocator allocator;
     public final List<Map<String, String>> results = Lists.newArrayList();
@@ -130,41 +124,52 @@ public class QueryWrapper {
     }
 
     @Override
-    public void submissionFailed(RpcException ex) {
+    public void submissionFailed(UserException ex) {
       exception = ex;
       logger.error("Query Failed", ex);
       latch.countDown();
     }
 
     @Override
-    public void resultArrived(QueryResultBatch result, ConnectionThrottle throttle) {
+    public void queryCompleted(QueryState state) {
+      latch.countDown();
+    }
+
+    @Override
+    public void dataArrived(QueryDataBatch result, ConnectionThrottle throttle) {
       try {
         final int rows = result.getHeader().getRowCount();
         if (result.hasData()) {
-          final RecordBatchLoader loader = new RecordBatchLoader(allocator);
-          loader.load(result.getHeader().getDef(), result.getData());
-          for (int i = 0; i < loader.getSchema().getFieldCount(); ++i) {
-            columns.add(loader.getSchema().getColumn(i).getPath().getAsUnescapedPath());
-          }
-          for (int i = 0; i < rows; ++i) {
-            final Map<String, String> record = Maps.newHashMap();
-            for (VectorWrapper<?> vw : loader) {
-              final String field = vw.getValueVector().getMetadata().getNamePart().getName();
-              final ValueVector.Accessor accessor = vw.getValueVector().getAccessor();
-              final Object value = i < accessor.getValueCount() ? accessor.getObject(i) : null;
-              final String display = value == null ? null : value.toString();
-              record.put(field, display);
+          RecordBatchLoader loader = null;
+          try {
+            loader = new RecordBatchLoader(allocator);
+            loader.load(result.getHeader().getDef(), result.getData());
+            // TODO:  Clean:  DRILL-2933:  That load(...) no longer throws
+            // SchemaChangeException, so check/clean catch clause below.
+            for (int i = 0; i < loader.getSchema().getFieldCount(); ++i) {
+              columns.add(loader.getSchema().getColumn(i).getPath());
             }
-            results.add(record);
+            for (int i = 0; i < rows; ++i) {
+              final Map<String, String> record = Maps.newHashMap();
+              for (VectorWrapper<?> vw : loader) {
+                final String field = vw.getValueVector().getMetadata().getNamePart().getName();
+                final ValueVector.Accessor accessor = vw.getValueVector().getAccessor();
+                final Object value = i < accessor.getValueCount() ? accessor.getObject(i) : null;
+                final String display = value == null ? null : value.toString();
+                record.put(field, display);
+              }
+              results.add(record);
+            }
+          } finally {
+            if (loader != null) {
+              loader.clear();
+            }
           }
         }
       } catch (SchemaChangeException e) {
         throw new RuntimeException(e);
       } finally {
         result.release();
-        if (result.getHeader().getIsLastChunk()) {
-          latch.countDown();
-        }
       }
     }
 

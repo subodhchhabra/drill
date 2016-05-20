@@ -19,6 +19,7 @@
  ******************************************************************************/
 package org.apache.drill.exec.fn.hive;
 
+import org.apache.hadoop.hive.common.type.HiveChar;
 import org.apache.hadoop.hive.common.type.HiveDecimal;
 import org.apache.hadoop.hive.common.type.HiveVarchar;
 import org.apache.hadoop.hive.ql.exec.Description;
@@ -36,6 +37,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.ByteObjectInspect
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.DateObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.DoubleObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.FloatObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveCharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveDecimalObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveVarcharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.IntObjectInspector;
@@ -103,7 +105,7 @@ public class HiveTestUDFImpls {
 
     @Override
     public Object evaluate(DeferredObject[] arguments) throws HiveException {
-      if (arguments[0] == null) {
+      if (arguments[0] == null || arguments[0].get() == null) {
         return null;
       }
 
@@ -128,7 +130,14 @@ public class HiveTestUDFImpls {
         case BINARY:
           return PrimitiveObjectInspectorUtils.getBinary(input, (BinaryObjectInspector) argumentOI).getBytes();
         case VARCHAR:
-          return PrimitiveObjectInspectorUtils.getHiveVarchar(input, (HiveVarcharObjectInspector)argumentOI);
+          if (outputType == PrimitiveCategory.CHAR) {
+            HiveVarchar hiveVarchar = PrimitiveObjectInspectorUtils.getHiveVarchar(input, (HiveVarcharObjectInspector) argumentOI);
+            return new HiveChar(hiveVarchar.getValue(), HiveChar.MAX_CHAR_LENGTH);
+          } else {
+            return PrimitiveObjectInspectorUtils.getHiveVarchar(input, (HiveVarcharObjectInspector)argumentOI);
+          }
+        case CHAR:
+          return PrimitiveObjectInspectorUtils.getHiveChar(input, (HiveCharObjectInspector) argumentOI);
         case DATE:
           return PrimitiveObjectInspectorUtils.getDate(input, (DateObjectInspector) argumentOI);
         case TIMESTAMP:
@@ -151,6 +160,7 @@ public class HiveTestUDFImpls {
     }
   }
 
+  // TODO(DRILL-2470) - re-enable the test case for this function in TestSampleHiveUDFs
   @Description(name = "testHiveUDFBYTE", value = "_FUNC_(BYTE) - Tests byte data as input and output")
   public static class GenericUDFTestBYTE extends GenericUDFTestBase {
     public GenericUDFTestBYTE() {
@@ -158,6 +168,7 @@ public class HiveTestUDFImpls {
     }
   }
 
+  // TODO(DRILL-2470) - re-enable the test case for this function in TestSampleHiveUDFs
   @Description(name = "testHiveUDFSHORT", value = "_FUNC_(SHORT) - Tests short data as input and output")
   public static class GenericUDFTestSHORT extends GenericUDFTestBase {
     public GenericUDFTestSHORT() {
@@ -197,6 +208,13 @@ public class HiveTestUDFImpls {
   public static class GenericUDFTestVARCHAR extends GenericUDFTestBase {
     public GenericUDFTestVARCHAR() {
       super("testHiveUDFVARCHAR", PrimitiveCategory.VARCHAR);
+    }
+  }
+
+  @Description(name = "testHiveUDFCHAR", value = "_FUNC_(VARCHAR) - Tests varchar data as input and char data as output")
+  public static class GenericUDFTestCHAR extends GenericUDFTestBase {
+    public GenericUDFTestCHAR() {
+      super("testHiveUDFCHAR", PrimitiveCategory.VARCHAR, PrimitiveCategory.CHAR);
     }
   }
 

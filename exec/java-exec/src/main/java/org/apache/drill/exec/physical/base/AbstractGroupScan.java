@@ -17,18 +17,31 @@
  */
 package org.apache.drill.exec.physical.base;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
+import com.google.common.collect.Lists;
+
 import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.exec.physical.EndpointAffinity;
+import org.apache.drill.exec.planner.fragment.DistributionAffinity;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.collect.Iterators;
-import org.apache.drill.exec.physical.EndpointAffinity;
 
 public abstract class AbstractGroupScan extends AbstractBase implements GroupScan {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(AbstractGroupScan.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(AbstractGroupScan.class);
+
+  public AbstractGroupScan(String userName) {
+    super(userName);
+  }
+
+  public AbstractGroupScan(AbstractGroupScan that) {
+    super(that);
+  }
 
   @Override
   public Iterator<PhysicalOperator> iterator() {
@@ -53,6 +66,29 @@ public abstract class AbstractGroupScan extends AbstractBase implements GroupSca
   @Override
   public GroupScan clone(List<SchemaPath> columns) {
     throw new UnsupportedOperationException(String.format("%s does not implement clone(columns) method!", this.getClass().getCanonicalName()));
+  }
+
+  @Override
+  @JsonIgnore
+  public int getMinParallelizationWidth() {
+    return 1;
+  }
+
+  @Override
+  public ScanStats getScanStats(PlannerSettings settings) {
+    return getScanStats();
+  }
+
+  @JsonIgnore
+  public ScanStats getScanStats() {
+    throw new UnsupportedOperationException("This should be implemented.");
+  }
+
+  @Override
+  @JsonIgnore
+  @Deprecated
+  public boolean enforceWidth() {
+    return getMinParallelizationWidth() > 1;
   }
 
   @Override
@@ -90,5 +126,45 @@ public abstract class AbstractGroupScan extends AbstractBase implements GroupSca
   @Override
   public int getOperatorType() {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public List<SchemaPath> getPartitionColumns() {
+    return Lists.newArrayList();
+  }
+
+  /**
+   * Default is not to support limit pushdown.
+   * @return
+   */
+  @Override
+  @JsonIgnore
+  public boolean supportsLimitPushdown() {
+    return false;
+  }
+
+  /**
+   * By default, return null to indicate rowcount based prune is not supported.
+   * Each groupscan subclass should override, if it supports rowcount based prune.
+   */
+  @Override
+  @JsonIgnore
+  public GroupScan applyLimit(long maxRecords) {
+    return null;
+  }
+
+  @Override
+  public boolean hasFiles() {
+    return false;
+  }
+
+  @Override
+  public Collection<String> getFiles() {
+    return null;
+  }
+
+  @Override
+  public DistributionAffinity getDistributionAffinity() {
+    return DistributionAffinity.SOFT;
   }
 }

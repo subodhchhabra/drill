@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.expression.SchemaPath;
@@ -51,8 +52,6 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.HTable;
-
-import parquet.org.codehaus.jackson.annotate.JsonCreator;
 
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -86,7 +85,7 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
 
   private HBaseStoragePlugin storagePlugin;
 
-  private Stopwatch watch = new Stopwatch();
+  private Stopwatch watch = Stopwatch.createUnstarted();
 
   private Map<Integer, List<HBaseSubScanSpec>> endpointFragmentMapping;
 
@@ -101,18 +100,21 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
   private long scanSizeInBytes = 0;
 
   @JsonCreator
-  public HBaseGroupScan(@JsonProperty("hbaseScanSpec") HBaseScanSpec hbaseScanSpec,
+  public HBaseGroupScan(@JsonProperty("userName") String userName,
+                        @JsonProperty("hbaseScanSpec") HBaseScanSpec hbaseScanSpec,
                         @JsonProperty("storage") HBaseStoragePluginConfig storagePluginConfig,
                         @JsonProperty("columns") List<SchemaPath> columns,
                         @JacksonInject StoragePluginRegistry pluginRegistry) throws IOException, ExecutionSetupException {
-    this ((HBaseStoragePlugin) pluginRegistry.getPlugin(storagePluginConfig), hbaseScanSpec, columns);
+    this (userName, (HBaseStoragePlugin) pluginRegistry.getPlugin(storagePluginConfig), hbaseScanSpec, columns);
   }
 
-  public HBaseGroupScan(HBaseStoragePlugin storagePlugin, HBaseScanSpec scanSpec, List<SchemaPath> columns) {
+  public HBaseGroupScan(String userName, HBaseStoragePlugin storagePlugin, HBaseScanSpec scanSpec,
+      List<SchemaPath> columns) {
+    super(userName);
     this.storagePlugin = storagePlugin;
     this.storagePluginConfig = storagePlugin.getConfig();
     this.hbaseScanSpec = scanSpec;
-    this.columns = columns == null || columns.size() == 0? ALL_COLUMNS : columns;
+    this.columns = columns == null ? ALL_COLUMNS : columns;
     init();
   }
 
@@ -121,7 +123,8 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
    * @param that The HBaseGroupScan to clone
    */
   private HBaseGroupScan(HBaseGroupScan that) {
-    this.columns = that.columns;
+    super(that);
+    this.columns = that.columns == null ? ALL_COLUMNS : that.columns;
     this.hbaseScanSpec = that.hbaseScanSpec;
     this.endpointFragmentMapping = that.endpointFragmentMapping;
     this.regionsToScan = that.regionsToScan;
@@ -136,7 +139,7 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
   @Override
   public GroupScan clone(List<SchemaPath> columns) {
     HBaseGroupScan newScan = new HBaseGroupScan(this);
-    newScan.columns = columns;
+    newScan.columns = columns == null ? ALL_COLUMNS : columns;;
     newScan.verifyColumns();
     return newScan;
   }
@@ -342,7 +345,8 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
     assert minorFragmentId < endpointFragmentMapping.size() : String.format(
         "Mappings length [%d] should be greater than minor fragment id [%d] but it isn't.", endpointFragmentMapping.size(),
         minorFragmentId);
-    return new HBaseSubScan(storagePlugin, storagePluginConfig, endpointFragmentMapping.get(minorFragmentId), columns);
+    return new HBaseSubScan(getUserName(), storagePlugin, storagePluginConfig,
+        endpointFragmentMapping.get(minorFragmentId), columns);
   }
 
   @Override
@@ -427,7 +431,9 @@ public class HBaseGroupScan extends AbstractGroupScan implements DrillHBaseConst
    * Empty constructor, do not use, only for testing.
    */
   @VisibleForTesting
-  public HBaseGroupScan() { }
+  public HBaseGroupScan() {
+    super((String)null);
+  }
 
   /**
    * Do not use, only for testing.

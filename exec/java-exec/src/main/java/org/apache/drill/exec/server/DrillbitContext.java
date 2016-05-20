@@ -17,11 +17,15 @@
  */
 package org.apache.drill.exec.server;
 
+import static com.google.common.base.Preconditions.checkNotNull;
 import io.netty.channel.EventLoopGroup;
 
 import java.util.Collection;
+import java.util.concurrent.ExecutorService;
 
 import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.config.LogicalPlanPersistence;
+import org.apache.drill.common.scanner.persistence.ScanResult;
 import org.apache.drill.exec.compile.CodeCompiler;
 import org.apache.drill.exec.coord.ClusterCoordinator;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
@@ -33,19 +37,17 @@ import org.apache.drill.exec.rpc.control.Controller;
 import org.apache.drill.exec.rpc.control.WorkEventBus;
 import org.apache.drill.exec.rpc.data.DataConnectionCreator;
 import org.apache.drill.exec.server.options.SystemOptionManager;
+import org.apache.drill.exec.store.SchemaFactory;
 import org.apache.drill.exec.store.StoragePluginRegistry;
-import org.apache.drill.exec.store.StoragePluginRegistry.DrillSchemaFactory;
-import org.apache.drill.exec.store.sys.PStoreProvider;
+import org.apache.drill.exec.store.sys.PersistentStoreProvider;
 
 import com.codahale.metrics.MetricRegistry;
-import com.google.common.base.Preconditions;
 
-public class DrillbitContext {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DrillbitContext.class);
+public class DrillbitContext implements AutoCloseable {
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DrillbitContext.class);
 
   private final BootStrapContext context;
-
-  private PhysicalPlanReader reader;
+  private final PhysicalPlanReader reader;
   private final ClusterCoordinator coord;
   private final DataConnectionCreator connectionsPool;
   private final DrillbitEndpoint endpoint;
@@ -55,27 +57,38 @@ public class DrillbitContext {
   private final WorkEventBus workBus;
   private final FunctionImplementationRegistry functionRegistry;
   private final SystemOptionManager systemOptions;
-  private final PStoreProvider provider;
+  private final PersistentStoreProvider provider;
   private final CodeCompiler compiler;
+  private final ScanResult classpathScan;
+  private final LogicalPlanPersistence lpPersistence;
 
-  public DrillbitContext(DrillbitEndpoint endpoint, BootStrapContext context, ClusterCoordinator coord, Controller controller, DataConnectionCreator connectionsPool, WorkEventBus workBus, PStoreProvider provider) {
-    super();
-    Preconditions.checkNotNull(endpoint);
-    Preconditions.checkNotNull(context);
-    Preconditions.checkNotNull(controller);
-    Preconditions.checkNotNull(connectionsPool);
+
+  public DrillbitContext(
+      DrillbitEndpoint endpoint,
+      BootStrapContext context,
+      ClusterCoordinator coord,
+      Controller controller,
+      DataConnectionCreator connectionsPool,
+      WorkEventBus workBus,
+      PersistentStoreProvider provider) {
+    this.classpathScan = context.getClasspathScan();
     this.workBus = workBus;
-    this.controller = controller;
-    this.context = context;
+    this.controller = checkNotNull(controller);
+    this.context = checkNotNull(context);
     this.coord = coord;
-    this.connectionsPool = connectionsPool;
-    this.endpoint = endpoint;
+    this.connectionsPool = checkNotNull(connectionsPool);
+    this.endpoint = checkNotNull(endpoint);
     this.provider = provider;
-    this.storagePlugins = new StoragePluginRegistry(this);
-    this.reader = new PhysicalPlanReader(context.getConfig(), context.getConfig().getMapper(), endpoint, storagePlugins);
-    this.operatorCreatorRegistry = new OperatorCreatorRegistry(context.getConfig());
-    this.systemOptions = new SystemOptionManager(context.getConfig(), provider);
-    this.functionRegistry = new FunctionImplementationRegistry(context.getConfig(), systemOptions);
+    this.lpPersistence = new LogicalPlanPersistence(context.getConfig(), classpathScan);
+
+    // TODO remove escaping "this".
+    this.storagePlugins = context.getConfig()
+        .getInstance(StoragePluginRegistry.STORAGE_PLUGIN_REGISTRY_IMPL, StoragePluginRegistry.class, this);
+
+    this.reader = new PhysicalPlanReader(context.getConfig(), classpathScan, lpPersistence, endpoint, storagePlugins);
+    this.operatorCreatorRegistry = new OperatorCreatorRegistry(classpathScan);
+    this.systemOptions = new SystemOptionManager(lpPersistence, provider);
+    this.functionRegistry = new FunctionImplementationRegistry(context.getConfig(), classpathScan, systemOptions);
     this.compiler = new CodeCompiler(context.getConfig(), systemOptions);
   }
 
@@ -83,7 +96,7 @@ public class DrillbitContext {
     return functionRegistry;
   }
 
-  public WorkEventBus getWorkBus(){
+  public WorkEventBus getWorkBus() {
     return workBus;
   }
 
@@ -95,7 +108,7 @@ public class DrillbitContext {
     return systemOptions;
   }
 
-  public DrillbitEndpoint getEndpoint(){
+  public DrillbitEndpoint getEndpoint() {
     return endpoint;
   }
 
@@ -103,11 +116,11 @@ public class DrillbitContext {
     return context.getConfig();
   }
 
-  public Collection<DrillbitEndpoint> getBits(){
+  public Collection<DrillbitEndpoint> getBits() {
     return coord.getAvailableEndpoints();
   }
 
-  public BufferAllocator getAllocator(){
+  public BufferAllocator getAllocator() {
     return context.getAllocator();
   }
 
@@ -115,35 +128,35 @@ public class DrillbitContext {
     return operatorCreatorRegistry;
   }
 
-  public StoragePluginRegistry getStorage(){
+  public StoragePluginRegistry getStorage() {
     return this.storagePlugins;
   }
 
-  public EventLoopGroup getBitLoopGroup(){
+  public EventLoopGroup getBitLoopGroup() {
     return context.getBitLoopGroup();
   }
 
-  public DataConnectionCreator getDataConnectionsPool(){
+  public DataConnectionCreator getDataConnectionsPool() {
     return connectionsPool;
   }
 
-  public Controller getController(){
+  public Controller getController() {
     return controller;
   }
 
-  public MetricRegistry getMetrics(){
+  public MetricRegistry getMetrics() {
     return context.getMetrics();
   }
 
-  public PhysicalPlanReader getPlanReader(){
+  public PhysicalPlanReader getPlanReader() {
     return reader;
   }
 
-  public PStoreProvider getPersistentStoreProvider(){
+  public PersistentStoreProvider getStoreProvider() {
     return provider;
   }
 
-  public DrillSchemaFactory getSchemaFactory(){
+  public SchemaFactory getSchemaFactory() {
     return storagePlugins.getSchemaFactory();
   }
 
@@ -155,6 +168,20 @@ public class DrillbitContext {
     return compiler;
   }
 
+  public ExecutorService getExecutor() {
+    return context.getExecutor();
+  }
 
+  public LogicalPlanPersistence getLpPersistence() {
+    return lpPersistence;
+  }
 
+  public ScanResult getClasspathScan() {
+    return classpathScan;
+  }
+
+  @Override
+  public void close() throws Exception {
+    getOptionManager().close();
+  }
 }

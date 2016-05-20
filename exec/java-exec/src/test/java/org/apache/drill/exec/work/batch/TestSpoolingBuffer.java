@@ -21,11 +21,12 @@ import static org.junit.Assert.assertEquals;
 
 import java.util.List;
 
+import org.apache.drill.BaseTestQuery;
 import org.apache.drill.common.config.DrillConfig;
 import org.apache.drill.common.util.FileUtils;
 import org.apache.drill.exec.ExecTest;
 import org.apache.drill.exec.client.DrillClient;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.server.Drillbit;
 import org.apache.drill.exec.server.RemoteServiceSet;
 import org.junit.Test;
@@ -33,7 +34,7 @@ import org.junit.Test;
 import com.google.common.base.Charsets;
 import com.google.common.io.Files;
 
-public class TestSpoolingBuffer extends ExecTest {
+public class TestSpoolingBuffer extends BaseTestQuery {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestSpoolingBuffer.class);
 
   @Test
@@ -46,11 +47,11 @@ public class TestSpoolingBuffer extends ExecTest {
 
       bit1.run();
       client.connect();
-      List<QueryResultBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
+      List<QueryDataBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
               Files.toString(FileUtils.getResourceAsFile("/work/batch/multiple_exchange.json"),
                       Charsets.UTF_8));
       int count = 0;
-      for(QueryResultBatch b : results) {
+      for(QueryDataBatch b : results) {
         if (b.getHeader().getRowCount() != 0) {
           count += b.getHeader().getRowCount();
         }
@@ -59,5 +60,4 @@ public class TestSpoolingBuffer extends ExecTest {
       assertEquals(500024, count);
     }
   }
-
 }

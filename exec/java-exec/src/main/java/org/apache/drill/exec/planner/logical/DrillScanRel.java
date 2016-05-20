@@ -25,20 +25,20 @@ import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.logical.data.LogicalOperator;
 import org.apache.drill.common.logical.data.Scan;
-import org.apache.drill.exec.physical.base.AbstractGroupScan;
 import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.physical.base.ScanStats;
 import org.apache.drill.exec.planner.common.DrillScanRelBase;
 import org.apache.drill.exec.planner.cost.DrillCostBase.DrillCostFactory;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
 import org.apache.drill.exec.planner.physical.PrelUtil;
 import org.apache.drill.exec.planner.torel.ConversionContext;
-import org.eigenbase.rel.RelWriter;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelOptCost;
-import org.eigenbase.relopt.RelOptPlanner;
-import org.eigenbase.relopt.RelOptTable;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.reltype.RelDataType;
+import org.apache.calcite.rel.RelWriter;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptCost;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelOptTable;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.type.RelDataType;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
@@ -53,35 +53,60 @@ public class DrillScanRel extends DrillScanRelBase implements DrillRel {
   final private RelDataType rowType;
   private GroupScan groupScan;
   private List<SchemaPath> columns;
+  private PlannerSettings settings;
+  private final boolean partitionFilterPushdown;
 
   /** Creates a DrillScan. */
-  public DrillScanRel(RelOptCluster cluster, RelTraitSet traits,
-      RelOptTable table) {
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+                      final RelOptTable table) {
+    this(cluster, traits, table, false);
+  }
+    /** Creates a DrillScan. */
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+      final RelOptTable table, boolean partitionFilterPushdown) {
     // By default, scan does not support project pushdown.
     // Decision whether push projects into scan will be made solely in DrillPushProjIntoScanRule.
-    this(cluster, traits, table, table.getRowType(), AbstractGroupScan.ALL_COLUMNS);
+    this(cluster, traits, table, table.getRowType(), GroupScan.ALL_COLUMNS, partitionFilterPushdown);
+    this.settings = PrelUtil.getPlannerSettings(cluster.getPlanner());
   }
 
   /** Creates a DrillScan. */
-  public DrillScanRel(RelOptCluster cluster, RelTraitSet traits,
-      RelOptTable table, RelDataType rowType, List<SchemaPath> columns) {
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+                      final RelOptTable table, final RelDataType rowType, final List<SchemaPath> columns) {
+    this(cluster, traits, table, rowType, columns, false);
+  }
+
+  /** Creates a DrillScan. */
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+      final RelOptTable table, final RelDataType rowType, final List<SchemaPath> columns, boolean partitionFilterPushdown) {
     super(DRILL_LOGICAL, cluster, traits, table);
+    this.settings = PrelUtil.getPlannerSettings(cluster.getPlanner());
     this.rowType = rowType;
-    this.columns = columns == null || columns.size() == 0 ? GroupScan.ALL_COLUMNS : columns;
+    Preconditions.checkNotNull(columns);
+    this.columns = columns;
+    this.partitionFilterPushdown = partitionFilterPushdown;
     try {
       this.groupScan = drillTable.getGroupScan().clone(this.columns);
-    } catch (IOException e) {
+    } catch (final IOException e) {
       throw new DrillRuntimeException("Failure creating scan.", e);
     }
   }
 
   /** Creates a DrillScanRel for a particular GroupScan */
-  public DrillScanRel(RelOptCluster cluster, RelTraitSet traits,
-      RelOptTable table, GroupScan groupScan, RelDataType rowType, List<SchemaPath> columns) {
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+                      final RelOptTable table, final GroupScan groupScan, final RelDataType rowType, final List<SchemaPath> columns) {
+    this(cluster, traits, table, groupScan, rowType, columns, false);
+  }
+
+  /** Creates a DrillScanRel for a particular GroupScan */
+  public DrillScanRel(final RelOptCluster cluster, final RelTraitSet traits,
+      final RelOptTable table, final GroupScan groupScan, final RelDataType rowType, final List<SchemaPath> columns, boolean partitionFilterPushdown) {
     super(DRILL_LOGICAL, cluster, traits, table);
     this.rowType = rowType;
     this.columns = columns;
     this.groupScan = groupScan;
+    this.settings = PrelUtil.getPlannerSettings(cluster.getPlanner());
+    this.partitionFilterPushdown = partitionFilterPushdown;
   }
 
 //
@@ -123,15 +148,15 @@ public class DrillScanRel extends DrillScanRelBase implements DrillRel {
 
   @Override
   public double getRows() {
-    return this.groupScan.getScanStats().getRecordCount();
+    return this.groupScan.getScanStats(settings).getRecordCount();
   }
 
   /// TODO: this method is same as the one for ScanPrel...eventually we should consolidate
   /// this and few other methods in a common base class which would be extended
   /// by both logical and physical rels.
   @Override
-  public RelOptCost computeSelfCost(RelOptPlanner planner) {
-    ScanStats stats = groupScan.getScanStats();
+  public RelOptCost computeSelfCost(final RelOptPlanner planner) {
+    final ScanStats stats = groupScan.getScanStats(settings);
     int columnCount = getRowType().getFieldCount();
     double ioCost = 0;
     boolean isStarQuery = Iterables.tryFind(getRowType().getFieldNames(), new Predicate<String>() {
@@ -168,6 +193,10 @@ public class DrillScanRel extends DrillScanRelBase implements DrillRel {
 
   public GroupScan getGroupScan() {
     return groupScan;
+  }
+
+  public boolean partitionFilterPushdown() {
+    return this.partitionFilterPushdown;
   }
 
 }

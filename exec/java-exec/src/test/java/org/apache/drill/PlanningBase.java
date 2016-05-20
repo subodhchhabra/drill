@@ -22,14 +22,18 @@ import java.net.URL;
 
 import mockit.Mocked;
 import mockit.NonStrictExpectations;
-import net.hydromatic.optiq.SchemaPlus;
-import net.hydromatic.optiq.jdbc.SimpleOptiqSchema;
 
+import org.apache.calcite.jdbc.SimpleCalciteSchema;
+import org.apache.calcite.schema.SchemaPlus;
 import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.config.LogicalPlanPersistence;
+import org.apache.drill.common.scanner.ClassPathScanner;
+import org.apache.drill.common.scanner.persistence.ScanResult;
 import org.apache.drill.common.util.TestTools;
 import org.apache.drill.exec.ExecTest;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
-import org.apache.drill.exec.memory.TopLevelAllocator;
+import org.apache.drill.exec.memory.BufferAllocator;
+import org.apache.drill.exec.memory.RootAllocatorFactory;
 import org.apache.drill.exec.ops.QueryContext;
 import org.apache.drill.exec.physical.PhysicalPlan;
 import org.apache.drill.exec.planner.physical.PlannerSettings;
@@ -41,8 +45,11 @@ import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.server.options.QueryOptionManager;
 import org.apache.drill.exec.server.options.SessionOptionManager;
 import org.apache.drill.exec.server.options.SystemOptionManager;
+import org.apache.drill.exec.store.SchemaConfig;
 import org.apache.drill.exec.store.StoragePluginRegistry;
-import org.apache.drill.exec.store.sys.local.LocalPStoreProvider;
+import org.apache.drill.exec.store.StoragePluginRegistryImpl;
+import org.apache.drill.exec.store.sys.store.provider.LocalPersistentStoreProvider;
+import org.apache.drill.exec.testing.ExecutionControls;
 import org.junit.Rule;
 import org.junit.rules.TestRule;
 
@@ -52,58 +59,66 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.io.Resources;
 
 public class PlanningBase extends ExecTest{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PlanningBase.class);
+  //private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PlanningBase.class);
 
   @Rule public final TestRule TIMEOUT = TestTools.getTimeoutRule(10000);
 
   @Mocked DrillbitContext dbContext;
-  @Mocked QueryContext context;
   private final DrillConfig config = DrillConfig.create();
 
+  @Mocked QueryContext context;
+
+  BufferAllocator allocator = RootAllocatorFactory.newRoot(config);
 
   protected void testSqlPlanFromFile(String file) throws Exception {
     testSqlPlan(getFile(file));
   }
 
   protected void testSqlPlan(String sqlCommands) throws Exception {
-    String[] sqlStrings = sqlCommands.split(";");
-
-
-    final LocalPStoreProvider provider = new LocalPStoreProvider(config);
+    final String[] sqlStrings = sqlCommands.split(";");
+    final LocalPersistentStoreProvider provider = new LocalPersistentStoreProvider(config);
     provider.start();
-
-    final SystemOptionManager systemOptions = new SystemOptionManager(config, provider);
+    final ScanResult scanResult = ClassPathScanner.fromPrescan(config);
+    final LogicalPlanPersistence logicalPlanPersistence = new LogicalPlanPersistence(config, scanResult);
+    final SystemOptionManager systemOptions = new SystemOptionManager(logicalPlanPersistence , provider);
     systemOptions.init();
-    final SessionOptionManager sessionOptions = new SessionOptionManager(systemOptions);
+    final UserSession userSession = UserSession.Builder.newBuilder().withOptionManager(systemOptions).build();
+    final SessionOptionManager sessionOptions = (SessionOptionManager) userSession.getOptions();
     final QueryOptionManager queryOptions = new QueryOptionManager(sessionOptions);
+    final ExecutionControls executionControls = new ExecutionControls(queryOptions, DrillbitEndpoint.getDefaultInstance());
 
     new NonStrictExpectations() {
       {
         dbContext.getMetrics();
         result = new MetricRegistry();
         dbContext.getAllocator();
-        result = new TopLevelAllocator();
+        result = allocator;
         dbContext.getConfig();
         result = config;
         dbContext.getOptionManager();
         result = systemOptions;
-        dbContext.getPersistentStoreProvider();
+        dbContext.getStoreProvider();
         result = provider;
+        dbContext.getClasspathScan();
+        result = scanResult;
+        dbContext.getLpPersistence();
+        result = logicalPlanPersistence;
       }
     };
 
-    final StoragePluginRegistry registry = new StoragePluginRegistry(dbContext);
+    final StoragePluginRegistry registry = new StoragePluginRegistryImpl(dbContext);
     registry.init();
     final FunctionImplementationRegistry functionRegistry = new FunctionImplementationRegistry(config);
-    final DrillOperatorTable table = new DrillOperatorTable(functionRegistry);
-    final SchemaPlus root = SimpleOptiqSchema.createRootSchema(false);
-    registry.getSchemaFactory().registerSchemas(UserSession.Builder.newBuilder().setSupportComplexTypes(true).build(), root);
-
+    final DrillOperatorTable table = new DrillOperatorTable(functionRegistry, systemOptions);
+    final SchemaPlus root = SimpleCalciteSchema.createRootSchema(false);
+    registry.getSchemaFactory().registerSchemas(SchemaConfig.newBuilder("foo", context).build(), root);
 
     new NonStrictExpectations() {
       {
         context.getNewDefaultSchema();
         result = root;
+        context.getLpPersistence();
+        result = new LogicalPlanPersistence(config, ClassPathScanner.fromPrescan(config));
         context.getStorage();
         result = registry;
         context.getFunctionRegistry();
@@ -122,21 +137,25 @@ public class PlanningBase extends ExecTest{
         result = config;
         context.getDrillOperatorTable();
         result = table;
+        context.getAllocator();
+        result = allocator;
+        context.getExecutionControls();
+        result = executionControls;
+        dbContext.getLpPersistence();
+        result = logicalPlanPersistence;
       }
     };
 
-    for (String sql : sqlStrings) {
+    for (final String sql : sqlStrings) {
       if (sql.trim().isEmpty()) {
         continue;
       }
-      DrillSqlWorker worker = new DrillSqlWorker(context);
-      PhysicalPlan p = worker.getPlan(sql);
+      final PhysicalPlan p = DrillSqlWorker.getPlan(context, sql);
     }
-
   }
 
-  protected String getFile(String resource) throws IOException{
-    URL url = Resources.getResource(resource);
+  protected static String getFile(String resource) throws IOException {
+    final URL url = Resources.getResource(resource);
     if (url == null) {
       throw new IOException(String.format("Unable to find path %s.", resource));
     }

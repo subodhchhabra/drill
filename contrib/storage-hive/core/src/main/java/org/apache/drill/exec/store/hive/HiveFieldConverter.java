@@ -35,9 +35,7 @@ import org.apache.drill.exec.vector.NullableDecimal9Vector;
 import org.apache.drill.exec.vector.NullableFloat4Vector;
 import org.apache.drill.exec.vector.NullableFloat8Vector;
 import org.apache.drill.exec.vector.NullableIntVector;
-import org.apache.drill.exec.vector.NullableSmallIntVector;
 import org.apache.drill.exec.vector.NullableTimeStampVector;
-import org.apache.drill.exec.vector.NullableTinyIntVector;
 import org.apache.drill.exec.vector.NullableVarBinaryVector;
 import org.apache.drill.exec.vector.NullableVarCharVector;
 import org.apache.drill.exec.vector.ValueVector;
@@ -49,6 +47,7 @@ import org.apache.hadoop.hive.serde2.objectinspector.primitive.ByteObjectInspect
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.DateObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.DoubleObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.FloatObjectInspector;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveCharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveDecimalObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.HiveVarcharObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.IntObjectInspector;
@@ -65,12 +64,20 @@ import org.joda.time.DateTimeZone;
 
 import com.google.common.collect.Maps;
 
+import static org.apache.drill.exec.store.hive.HiveUtilities.throwUnsupportedHiveDataTypeError;
+
 public abstract class HiveFieldConverter {
 
   public abstract void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex);
 
   private static Map<PrimitiveCategory, Class< ? extends HiveFieldConverter>> primMap = Maps.newHashMap();
 
+  // TODO (DRILL-2470)
+  // Byte and short (tinyint and smallint in SQL types) are currently read as integers
+  // as these smaller integer types are not fully supported in Drill today.
+  // Here the same types are used, as we have to read out of the correct typed converter
+  // from the hive side, in the FieldConverter classes below for Byte and Short we convert
+  // to integer when writing into Drill's vectors.
   static {
     primMap.put(PrimitiveCategory.BINARY, Binary.class);
     primMap.put(PrimitiveCategory.BOOLEAN, Boolean.class);
@@ -84,6 +91,7 @@ public abstract class HiveFieldConverter {
     primMap.put(PrimitiveCategory.VARCHAR, VarChar.class);
     primMap.put(PrimitiveCategory.TIMESTAMP, Timestamp.class);
     primMap.put(PrimitiveCategory.DATE, Date.class);
+    primMap.put(PrimitiveCategory.CHAR, Char.class);
   }
 
 
@@ -113,7 +121,7 @@ public abstract class HiveFieldConverter {
           }
         }
 
-        HiveRecordReader.throwUnsupportedHiveDataTypeError(pCat.toString());
+        throwUnsupportedHiveDataTypeError(pCat.toString());
         break;
 
       case LIST:
@@ -121,7 +129,7 @@ public abstract class HiveFieldConverter {
       case STRUCT:
       case UNION:
       default:
-        HiveRecordReader.throwUnsupportedHiveDataTypeError(typeInfo.getCategory().toString());
+        throwUnsupportedHiveDataTypeError(typeInfo.getCategory().toString());
     }
 
     return null;
@@ -140,14 +148,6 @@ public abstract class HiveFieldConverter {
     public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
       final boolean value = (boolean) ((BooleanObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
       ((NullableBitVector) outputVV).getMutator().setSafe(outputIndex, value ? 1 : 0);
-    }
-  }
-
-  public static class Byte extends HiveFieldConverter {
-    @Override
-    public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
-      final byte value = (byte) ((ByteObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
-      ((NullableTinyIntVector) outputVV).getMutator().setSafe(outputIndex, value);
     }
   }
 
@@ -191,7 +191,7 @@ public abstract class HiveFieldConverter {
     public Decimal28(int precision, int scale, FragmentContext context) {
       holder.scale = scale;
       holder.precision = precision;
-      holder.buffer = context.getManagedBuffer(Decimal28SparseHolder.nDecimalDigits * DecimalUtility.integerSize);
+      holder.buffer = context.getManagedBuffer(Decimal28SparseHolder.nDecimalDigits * DecimalUtility.INTEGER_SIZE);
       holder.start = 0;
     }
 
@@ -210,7 +210,7 @@ public abstract class HiveFieldConverter {
     public Decimal38(int precision, int scale, FragmentContext context) {
       holder.scale = scale;
       holder.precision = precision;
-      holder.buffer = context.getManagedBuffer(Decimal38SparseHolder.nDecimalDigits * DecimalUtility.integerSize);
+      holder.buffer = context.getManagedBuffer(Decimal38SparseHolder.nDecimalDigits * DecimalUtility.INTEGER_SIZE);
       holder.start = 0;
     }
 
@@ -247,19 +247,30 @@ public abstract class HiveFieldConverter {
     }
   }
 
+  // TODO (DRILL-2470)
+  // Byte and short (tinyint and smallint in SQL types) are currently read as integers
+  // as these smaller integer types are not fully supported in Drill today.
+  public static class Short extends HiveFieldConverter {
+    @Override
+    public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
+      final int value = (short) ((ShortObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
+      ((NullableIntVector) outputVV).getMutator().setSafe(outputIndex, value);
+    }
+  }
+
+  public static class Byte extends HiveFieldConverter {
+    @Override
+    public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
+      final int value = (byte)((ByteObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
+      ((NullableIntVector) outputVV).getMutator().setSafe(outputIndex, value);
+    }
+  }
+
   public static class Long extends HiveFieldConverter {
     @Override
     public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
       final long value = (long) ((LongObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
       ((NullableBigIntVector) outputVV).getMutator().setSafe(outputIndex, value);
-    }
-  }
-
-  public static class Short extends HiveFieldConverter {
-    @Override
-    public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
-      final short value = (short) ((ShortObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
-      ((NullableSmallIntVector) outputVV).getMutator().setSafe(outputIndex, value);
     }
   }
 
@@ -298,6 +309,16 @@ public abstract class HiveFieldConverter {
       final java.sql.Date value = ((DateObjectInspector)oi).getPrimitiveJavaObject(hiveFieldValue);
       final DateTime date = new DateTime(value.getTime()).withZoneRetainFields(DateTimeZone.UTC);
       ((NullableDateVector) outputVV).getMutator().setSafe(outputIndex, date.getMillis());
+    }
+  }
+
+  public static class Char extends HiveFieldConverter {
+    @Override
+    public void setSafeValue(ObjectInspector oi, Object hiveFieldValue, ValueVector outputVV, int outputIndex) {
+      final Text value = ((HiveCharObjectInspector)oi).getPrimitiveWritableObject(hiveFieldValue).getStrippedValue();
+      final byte[] valueBytes = value.getBytes();
+      final int valueLen = value.getLength();
+      ((NullableVarCharVector) outputVV).getMutator().setSafe(outputIndex, valueBytes, 0, valueLen);
     }
   }
 

@@ -18,12 +18,13 @@
 package org.apache.drill.exec.store;
 
 import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
-import net.hydromatic.optiq.Function;
-import net.hydromatic.optiq.Schema;
-import net.hydromatic.optiq.Table;
-
+import org.apache.calcite.schema.Function;
+import org.apache.calcite.schema.Schema;
+import org.apache.calcite.schema.Table;
 import org.apache.drill.exec.planner.logical.CreateTableEntry;
 
 import com.google.common.collect.ImmutableList;
@@ -43,13 +44,27 @@ public class SubSchemaWrapper extends AbstractSchema {
   }
 
   @Override
-  public AbstractSchema getDefaultSchema() {
+  public Iterable<String> getSubPartitions(String table,
+                                           List<String> partitionColumns,
+                                           List<String> partitionValues
+  ) throws PartitionNotFoundException {
+    Schema defaultSchema = getDefaultSchema();
+    if (defaultSchema instanceof AbstractSchema) {
+      return ((AbstractSchema) defaultSchema).getSubPartitions(table, partitionColumns, partitionValues);
+    } else {
+      return Collections.EMPTY_LIST;
+    }
+
+  }
+
+  @Override
+  public Schema getDefaultSchema() {
     return innerSchema.getDefaultSchema();
   }
 
   @Override
-  public CreateTableEntry createNewTable(String tableName) {
-    return innerSchema.createNewTable(tableName);
+  public CreateTableEntry createNewTable(String tableName, List<String> partitionColumns) {
+    return innerSchema.createNewTable(tableName, partitionColumns);
   }
 
   @Override

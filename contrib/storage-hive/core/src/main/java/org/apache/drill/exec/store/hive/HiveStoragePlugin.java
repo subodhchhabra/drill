@@ -19,24 +19,32 @@ package org.apache.drill.exec.store.hive;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
+
 import com.google.common.collect.ImmutableSet;
 
-import net.hydromatic.optiq.Schema.TableType;
-import net.hydromatic.optiq.SchemaPlus;
+import org.apache.calcite.schema.Schema.TableType;
+import org.apache.calcite.schema.SchemaPlus;
 
 import org.apache.drill.common.JSONOptions;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.ops.OptimizerRulesContext;
+import org.apache.drill.exec.planner.sql.logical.ConvertHiveParquetScanToDrillParquetScan;
 import org.apache.drill.exec.planner.sql.logical.HivePushPartitionFilterIntoScan;
-import org.apache.drill.exec.rpc.user.UserSession;
 import org.apache.drill.exec.server.DrillbitContext;
 import org.apache.drill.exec.store.AbstractStoragePlugin;
+import org.apache.drill.exec.store.SchemaConfig;
 import org.apache.drill.exec.store.StoragePluginOptimizerRule;
 import org.apache.drill.exec.store.hive.schema.HiveSchemaFactory;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.conf.HiveConf.ConfVars;
 
 public class HiveStoragePlugin extends AbstractStoragePlugin {
 
@@ -46,12 +54,18 @@ public class HiveStoragePlugin extends AbstractStoragePlugin {
   private final HiveSchemaFactory schemaFactory;
   private final DrillbitContext context;
   private final String name;
+  private final HiveConf hiveConf;
 
   public HiveStoragePlugin(HiveStoragePluginConfig config, DrillbitContext context, String name) throws ExecutionSetupException {
     this.config = config;
     this.context = context;
-    this.schemaFactory = new HiveSchemaFactory(this, name, config.getHiveConfigOverride());
     this.name = name;
+    this.hiveConf = createHiveConf(config.getHiveConfigOverride());
+    this.schemaFactory = new HiveSchemaFactory(this, name, hiveConf);
+  }
+
+  public HiveConf getHiveConf() {
+    return hiveConf;
   }
 
   public HiveStoragePluginConfig getConfig() {
@@ -67,7 +81,7 @@ public class HiveStoragePlugin extends AbstractStoragePlugin {
   }
 
   @Override
-  public HiveScan getPhysicalScan(JSONOptions selection, List<SchemaPath> columns) throws IOException {
+  public HiveScan getPhysicalScan(String userName, JSONOptions selection, List<SchemaPath> columns) throws IOException {
     HiveReadEntry hiveReadEntry = selection.getListWith(new ObjectMapper(), new TypeReference<HiveReadEntry>(){});
     try {
       if (hiveReadEntry.getJdbcTableType() == TableType.VIEW) {
@@ -75,18 +89,47 @@ public class HiveStoragePlugin extends AbstractStoragePlugin {
             "Querying views created in Hive from Drill is not supported in current version.");
       }
 
-      return new HiveScan(hiveReadEntry, this, columns);
+      return new HiveScan(userName, hiveReadEntry, this, columns, null);
     } catch (ExecutionSetupException e) {
       throw new IOException(e);
     }
   }
 
   @Override
-  public void registerSchemas(UserSession session, SchemaPlus parent) {
-    schemaFactory.registerSchemas(session, parent);
-  }
-  public Set<StoragePluginOptimizerRule> getOptimizerRules() {
-    return ImmutableSet.of(HivePushPartitionFilterIntoScan.HIVE_FILTER_ON_PROJECT, HivePushPartitionFilterIntoScan.HIVE_FILTER_ON_SCAN);
+  public void registerSchemas(SchemaConfig schemaConfig, SchemaPlus parent) throws IOException {
+    schemaFactory.registerSchemas(schemaConfig, parent);
   }
 
+  @Override
+  public Set<StoragePluginOptimizerRule> getLogicalOptimizerRules(OptimizerRulesContext optimizerContext) {
+    final String defaultPartitionValue = hiveConf.get(ConfVars.DEFAULTPARTITIONNAME.varname);
+
+    ImmutableSet.Builder<StoragePluginOptimizerRule> ruleBuilder = ImmutableSet.builder();
+
+    ruleBuilder.add(HivePushPartitionFilterIntoScan.getFilterOnProject(optimizerContext, defaultPartitionValue));
+    ruleBuilder.add(HivePushPartitionFilterIntoScan.getFilterOnScan(optimizerContext, defaultPartitionValue));
+
+    return ruleBuilder.build();
+  }
+
+  @Override
+  public Set<StoragePluginOptimizerRule> getPhysicalOptimizerRules(OptimizerRulesContext optimizerRulesContext) {
+    if(optimizerRulesContext.getPlannerSettings().getOptions()
+        .getOption(ExecConstants.HIVE_OPTIMIZE_SCAN_WITH_NATIVE_READERS).bool_val) {
+      return ImmutableSet.<StoragePluginOptimizerRule>of(ConvertHiveParquetScanToDrillParquetScan.INSTANCE);
+    }
+
+    return ImmutableSet.of();
+  }
+
+  private static HiveConf createHiveConf(final Map<String, String> hiveConfigOverride) {
+    final HiveConf hiveConf = new HiveConf();
+    for(Entry<String, String> config : hiveConfigOverride.entrySet()) {
+      final String key = config.getKey();
+      final String value = config.getValue();
+      hiveConf.set(key, value);
+      logger.trace("HiveConfig Override {}={}", key, value);
+    }
+    return hiveConf;
+  }
 }

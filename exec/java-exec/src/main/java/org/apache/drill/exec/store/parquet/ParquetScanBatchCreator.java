@@ -21,9 +21,11 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.google.common.base.Stopwatch;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.expression.SchemaPath;
@@ -40,34 +42,34 @@ import org.apache.drill.exec.store.dfs.DrillFileSystem;
 import org.apache.drill.exec.store.parquet.columnreaders.ParquetRecordReader;
 import org.apache.drill.exec.store.parquet2.DrillParquetReader;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-
-import parquet.column.ColumnDescriptor;
-import parquet.hadoop.ParquetFileReader;
-import parquet.hadoop.metadata.ParquetMetadata;
-import parquet.schema.MessageType;
-import parquet.schema.Type;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.hadoop.CodecFactory;
+import org.apache.parquet.hadoop.ParquetFileReader;
+import org.apache.parquet.hadoop.metadata.ParquetMetadata;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Type;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 
 public class ParquetScanBatchCreator implements BatchCreator<ParquetRowGroupScan>{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ParquetScanBatchCreator.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ParquetScanBatchCreator.class);
 
   private static final String ENABLE_BYTES_READ_COUNTER = "parquet.benchmark.bytes.read";
   private static final String ENABLE_BYTES_TOTAL_COUNTER = "parquet.benchmark.bytes.total";
   private static final String ENABLE_TIME_READ_COUNTER = "parquet.benchmark.time.read";
 
   @Override
-  public RecordBatch getBatch(FragmentContext context, ParquetRowGroupScan rowGroupScan, List<RecordBatch> children) throws ExecutionSetupException {
+  public ScanBatch getBatch(FragmentContext context, ParquetRowGroupScan rowGroupScan, List<RecordBatch> children)
+      throws ExecutionSetupException {
     Preconditions.checkArgument(children.isEmpty());
-    String partitionDesignator = context.getConfig().getString(ExecConstants.FILESYSTEM_PARTITION_COLUMN_LABEL);
+    String partitionDesignator = context.getOptions()
+      .getOption(ExecConstants.FILESYSTEM_PARTITION_COLUMN_LABEL).string_val;
     List<SchemaPath> columns = rowGroupScan.getColumns();
     List<RecordReader> readers = Lists.newArrayList();
-    OperatorContext oContext = new OperatorContext(rowGroupScan, context,
-        false /* ScanBatch is not subject to fragment memory limit */);
+    OperatorContext oContext = context.newOperatorContext(rowGroupScan);
 
     List<String[]> partitionColumns = Lists.newArrayList();
     List<Integer> selectedPartitionColumns = Lists.newArrayList();
@@ -85,17 +87,20 @@ public class ParquetScanBatchCreator implements BatchCreator<ParquetRowGroupScan
           newColumns.add(column);
         }
       }
-      if (newColumns.isEmpty()) {
-        newColumns = GroupScan.ALL_COLUMNS;
-      }
       final int id = rowGroupScan.getOperatorId();
       // Create the new row group scan with the new columns
-      rowGroupScan = new ParquetRowGroupScan(rowGroupScan.getStorageEngine(), rowGroupScan.getRowGroupReadEntries(), newColumns, rowGroupScan.getSelectionRoot());
+      rowGroupScan = new ParquetRowGroupScan(rowGroupScan.getUserName(), rowGroupScan.getStorageEngine(),
+          rowGroupScan.getRowGroupReadEntries(), newColumns, rowGroupScan.getSelectionRoot());
       rowGroupScan.setOperatorId(id);
     }
 
-    DrillFileSystem fs = new DrillFileSystem(rowGroupScan.getStorageEngine().getFileSystem(), oContext.getStats());
-    Configuration conf = fs.getConf();
+    DrillFileSystem fs;
+    try {
+      fs = oContext.newFileSystem(rowGroupScan.getStorageEngine().getFsConf());
+    } catch(IOException e) {
+      throw new ExecutionSetupException(String.format("Failed to create DrillFileSystem: %s", e.getMessage()), e);
+    }
+    Configuration conf = new Configuration(fs.getConf());
     conf.setBoolean(ENABLE_BYTES_READ_COUNTER, false);
     conf.setBoolean(ENABLE_BYTES_TOTAL_COUNTER, false);
     conf.setBoolean(ENABLE_TIME_READ_COUNTER, false);
@@ -112,15 +117,21 @@ public class ParquetScanBatchCreator implements BatchCreator<ParquetRowGroupScan
       These fields will be added to the constructor below
       */
       try {
+        Stopwatch timer = Stopwatch.createUnstarted();
         if ( ! footers.containsKey(e.getPath())){
-          footers.put(e.getPath(),
-              ParquetFileReader.readFooter( fs.getConf(), new Path(e.getPath())));
+          timer.start();
+          ParquetMetadata footer = ParquetFileReader.readFooter(conf, new Path(e.getPath()));
+          long timeToRead = timer.elapsed(TimeUnit.MICROSECONDS);
+          logger.trace("ParquetTrace,Read Footer,{},{},{},{},{},{},{}", "", e.getPath(), "", 0, 0, 0, timeToRead);
+          footers.put(e.getPath(), footer );
         }
         if (!context.getOptions().getOption(ExecConstants.PARQUET_NEW_RECORD_READER).bool_val && !isComplex(footers.get(e.getPath()))) {
           readers.add(
               new ParquetRecordReader(
                   context, e.getPath(), e.getRowGroupIndex(), fs,
-                  rowGroupScan.getStorageEngine().getCodecFactoryExposer(),
+                  CodecFactory.createDirectCodecFactory(
+                  fs.getConf(),
+                  new ParquetDirectByteBufferAllocator(oContext.getAllocator()), 0),
                   footers.get(e.getPath()),
                   rowGroupScan.getColumns()
               )
@@ -130,8 +141,8 @@ public class ParquetScanBatchCreator implements BatchCreator<ParquetRowGroupScan
           readers.add(new DrillParquetReader(context, footer, e, newColumns, fs));
         }
         if (rowGroupScan.getSelectionRoot() != null) {
-          String[] r = rowGroupScan.getSelectionRoot().split("/");
-          String[] p = e.getPath().split("/");
+          String[] r = Path.getPathWithoutSchemeAndAuthority(new Path(rowGroupScan.getSelectionRoot())).toString().split("/");
+          String[] p = Path.getPathWithoutSchemeAndAuthority(new Path(e.getPath())).toString().split("/");
           if (p.length > r.length) {
             String[] q = ArrayUtils.subarray(p, r.length, p.length - 1);
             partitionColumns.add(q);
@@ -156,9 +167,6 @@ public class ParquetScanBatchCreator implements BatchCreator<ParquetRowGroupScan
     ScanBatch s =
         new ScanBatch(rowGroupScan, context, oContext, readers.iterator(), partitionColumns, selectedPartitionColumns);
 
-    for(RecordReader r  : readers){
-      r.setOperatorContext(s.getOperatorContext());
-    }
 
     return s;
   }

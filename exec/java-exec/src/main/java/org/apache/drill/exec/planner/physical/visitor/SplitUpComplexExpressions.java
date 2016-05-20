@@ -17,43 +17,30 @@
  ******************************************************************************/
 package org.apache.drill.exec.planner.physical.visitor;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
+import java.util.ArrayList;
+import java.util.List;
 
-import net.hydromatic.optiq.tools.RelConversionException;
-
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rel.type.RelDataTypeFieldImpl;
+import org.apache.calcite.rel.type.RelRecordType;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.tools.RelConversionException;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
-import org.apache.drill.exec.planner.logical.DrillRel;
-import org.apache.drill.exec.planner.logical.DrillScanRel;
-import org.apache.drill.exec.planner.logical.DrillTable;
-import org.apache.drill.exec.planner.physical.FlattenPrel;
+import org.apache.drill.exec.planner.StarColumnHelper;
 import org.apache.drill.exec.planner.physical.Prel;
 import org.apache.drill.exec.planner.physical.PrelUtil;
 import org.apache.drill.exec.planner.physical.ProjectPrel;
-import org.apache.drill.exec.planner.physical.PrelUtil.ProjectPushInfo;
-import org.apache.drill.exec.planner.physical.visitor.BasePrelVisitor;
+import org.apache.drill.exec.planner.sql.DrillOperatorTable;
 import org.apache.drill.exec.planner.types.RelDataTypeDrillImpl;
 import org.apache.drill.exec.planner.types.RelDataTypeHolder;
-import org.eigenbase.rel.ProjectRelBase;
-import org.eigenbase.rel.RelShuttleImpl;
-import org.apache.drill.exec.planner.sql.DrillOperatorTable;
-import org.eigenbase.rel.ProjectRel;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.reltype.RelDataTypeField;
-import org.eigenbase.reltype.RelDataTypeFieldImpl;
-import org.eigenbase.reltype.RelRecordType;
-import org.eigenbase.rex.RexBuilder;
-import org.eigenbase.rex.RexCall;
-import org.eigenbase.rex.RexLiteral;
-import org.eigenbase.rex.RexNode;
-import org.eigenbase.sql.SqlFunction;
-import org.eigenbase.sql.SqlOperator;
-import org.eigenbase.sql.type.SqlTypeName;
-import org.eigenbase.util.NlsString;
 
-import java.util.ArrayList;
-import java.util.List;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 
 public class SplitUpComplexExpressions extends BasePrelVisitor<Prel, Object, RelConversionException> {
 
@@ -82,18 +69,22 @@ public class SplitUpComplexExpressions extends BasePrelVisitor<Prel, Object, Rel
   @Override
   public Prel visitProject(ProjectPrel project, Object unused) throws RelConversionException {
 
+    // Apply the rule to the child
+    RelNode originalInput = ((Prel)project.getInput(0)).accept(this, null);
+    project = (ProjectPrel) project.copy(project.getTraitSet(), Lists.newArrayList(originalInput));
+
     List<RexNode> exprList = new ArrayList<>();
 
-    List<RelDataTypeField> relDataTypes = new ArrayList();
-    List<RelDataTypeField> origRelDataTypes = new ArrayList();
+    List<RelDataTypeField> relDataTypes = new ArrayList<>();
+    List<RelDataTypeField> origRelDataTypes = new ArrayList<>();
     int i = 0;
+    final int lastColumnReferenced = PrelUtil.getLastUsedColumnReference(project.getProjects());
 
-    ProjectPushInfo columnInfo = PrelUtil.getColumns(project.getInput(0).getRowType(), project.getProjects());
-
-    if (columnInfo == null ) {
+    if (lastColumnReferenced == -1) {
       return project;
     }
-    int lastRexInput = columnInfo.desiredFields.size();
+
+    final int lastRexInput = lastColumnReferenced + 1;
     RexVisitorComplexExprSplitter exprSplitter = new RexVisitorComplexExprSplitter(factory, funcReg, lastRexInput);
 
     for (RexNode rex : project.getChildExps()) {
@@ -103,14 +94,25 @@ public class SplitUpComplexExpressions extends BasePrelVisitor<Prel, Object, Rel
     }
     List<RexNode> complexExprs = exprSplitter.getComplexExprs();
 
-    RelNode originalInput = ((Prel)project.getInput(0)).accept(this, null);
+    if (complexExprs.size() == 1 && findTopComplexFunc(project.getChildExps()).size() == 1) {
+      return project;
+    }
+
     ProjectPrel childProject;
 
-    List<RexNode> allExprs = new ArrayList();
+    List<RexNode> allExprs = new ArrayList<>();
+    int exprIndex = 0;
+    List<String> fieldNames = originalInput.getRowType().getFieldNames();
     for (int index = 0; index < lastRexInput; index++) {
       RexBuilder builder = new RexBuilder(factory);
       allExprs.add(builder.makeInputRef( new RelDataTypeDrillImpl(new RelDataTypeHolder(), factory), index));
-      relDataTypes.add(new RelDataTypeFieldImpl("EXPR$" + index, allExprs.size(), factory.createSqlType(SqlTypeName.ANY) ));
+
+      if(fieldNames.get(index).contains(StarColumnHelper.STAR_COLUMN)) {
+        relDataTypes.add(new RelDataTypeFieldImpl(fieldNames.get(index), allExprs.size(), factory.createSqlType(SqlTypeName.ANY)));
+      } else {
+        relDataTypes.add(new RelDataTypeFieldImpl("EXPR$" + exprIndex, allExprs.size(), factory.createSqlType(SqlTypeName.ANY)));
+        exprIndex++;
+      }
     }
     RexNode currRexNode;
     int index = lastRexInput - 1;
@@ -124,9 +126,11 @@ public class SplitUpComplexExpressions extends BasePrelVisitor<Prel, Object, Rel
           allExprs.add(builder.makeInputRef( new RelDataTypeDrillImpl(new RelDataTypeHolder(), factory), index));
         }
         index++;
+        exprIndex++;
+
         currRexNode = complexExprs.remove(0);
         allExprs.add(currRexNode);
-        relDataTypes.add(new RelDataTypeFieldImpl("EXPR$" + index, allExprs.size(), factory.createSqlType(SqlTypeName.ANY) ));
+        relDataTypes.add(new RelDataTypeFieldImpl("EXPR$" + exprIndex, allExprs.size(), factory.createSqlType(SqlTypeName.ANY)));
         childProject = new ProjectPrel(project.getCluster(), project.getTraitSet(), originalInput, ImmutableList.copyOf(allExprs), new RelRecordType(relDataTypes));
         originalInput = childProject;
       }
@@ -138,4 +142,25 @@ public class SplitUpComplexExpressions extends BasePrelVisitor<Prel, Object, Rel
     }
     return (Prel) project.copy(project.getTraitSet(), originalInput, exprList, new RelRecordType(origRelDataTypes));
   }
+
+  /**
+   *  Find the list of expressions where Complex type function is at top level.
+   */
+  private List<RexNode> findTopComplexFunc(List<RexNode> exprs) {
+    final List<RexNode> topComplexFuncs = new ArrayList<>();
+
+    for (RexNode exp : exprs) {
+      if (exp instanceof RexCall) {
+        RexCall call = (RexCall) exp;
+        String functionName = call.getOperator().getName();
+
+        if (funcReg.isFunctionComplexOutput(functionName) ) {
+          topComplexFuncs.add(exp);
+        }
+      }
+    }
+
+    return topComplexFuncs;
+  }
+
 }

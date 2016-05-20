@@ -28,10 +28,14 @@ public enum RpcType implements com.dyuproject.protostuff.EnumLite<RpcType>
     RUN_QUERY(3),
     CANCEL_QUERY(4),
     REQUEST_RESULTS(5),
-    QUERY_RESULT(6),
+    RESUME_PAUSED_QUERY(11),
+    GET_QUERY_PLAN_FRAGMENTS(12),
+    QUERY_DATA(6),
     QUERY_HANDLE(7),
+    QUERY_PLAN_FRAGMENTS(13),
     REQ_META_FUNCTIONS(8),
-    RESP_FUNCTION_LIST(9);
+    RESP_FUNCTION_LIST(9),
+    QUERY_RESULT(10);
     
     public final int number;
     
@@ -55,10 +59,14 @@ public enum RpcType implements com.dyuproject.protostuff.EnumLite<RpcType>
             case 3: return RUN_QUERY;
             case 4: return CANCEL_QUERY;
             case 5: return REQUEST_RESULTS;
-            case 6: return QUERY_RESULT;
+            case 6: return QUERY_DATA;
             case 7: return QUERY_HANDLE;
             case 8: return REQ_META_FUNCTIONS;
             case 9: return RESP_FUNCTION_LIST;
+            case 10: return QUERY_RESULT;
+            case 11: return RESUME_PAUSED_QUERY;
+            case 12: return GET_QUERY_PLAN_FRAGMENTS;
+            case 13: return QUERY_PLAN_FRAGMENTS;
             default: return null;
         }
     }

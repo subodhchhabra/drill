@@ -24,20 +24,21 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.drill.exec.exception.FragmentSetupException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
-import org.apache.drill.exec.record.RawFragmentBatch;
 import org.apache.drill.exec.rpc.RemoteConnection;
+import org.apache.drill.exec.rpc.data.IncomingDataBatch;
 import org.apache.drill.exec.work.batch.IncomingBuffers;
 
-public class RootFragmentManager implements FragmentManager{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(RootFragmentManager.class);
+// TODO a lot of this is the same as NonRootFragmentManager
+public class RootFragmentManager implements FragmentManager {
+  // private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(RootFragmentManager.class);
 
   private final IncomingBuffers buffers;
   private final FragmentExecutor runner;
   private final FragmentHandle handle;
   private volatile boolean cancel = false;
-  private List<RemoteConnection> connections = new CopyOnWriteArrayList<>();
+  private final List<RemoteConnection> connections = new CopyOnWriteArrayList<>();
 
-  public RootFragmentManager(FragmentHandle handle, IncomingBuffers buffers, FragmentExecutor runner) {
+  public RootFragmentManager(final FragmentHandle handle, final IncomingBuffers buffers, final FragmentExecutor runner) {
     super();
     this.handle = handle;
     this.buffers = buffers;
@@ -45,8 +46,13 @@ public class RootFragmentManager implements FragmentManager{
   }
 
   @Override
-  public boolean handle(RawFragmentBatch batch) throws FragmentSetupException, IOException {
+  public boolean handle(final IncomingDataBatch batch) throws FragmentSetupException, IOException {
     return buffers.batchArrived(batch);
+  }
+
+  @Override
+  public void receivingFragmentFinished(final FragmentHandle handle) {
+    throw new IllegalStateException("The root fragment should not be sending any messages to receiver.");
   }
 
   @Override
@@ -61,6 +67,17 @@ public class RootFragmentManager implements FragmentManager{
   @Override
   public void cancel() {
     cancel = true;
+    runner.cancel();
+  }
+
+  @Override
+  public boolean isCancelled() {
+    return cancel;
+  }
+
+  @Override
+  public void unpause() {
+    runner.unpause();
   }
 
   @Override
@@ -74,13 +91,13 @@ public class RootFragmentManager implements FragmentManager{
   }
 
   @Override
-  public void addConnection(RemoteConnection connection) {
+  public void addConnection(final RemoteConnection connection) {
     connections.add(connection);
   }
 
   @Override
-  public void setAutoRead(boolean autoRead) {
-    for (RemoteConnection c : connections) {
+  public void setAutoRead(final boolean autoRead) {
+    for (final RemoteConnection c : connections) {
       c.setAutoRead(autoRead);
     }
   }

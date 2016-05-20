@@ -20,11 +20,11 @@ package org.apache.drill;
 import org.junit.Ignore;
 import org.junit.Test;
 
-public class TestTpchDistributed extends BaseTestQuery{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestTpchDistributed.class);
+public class TestTpchDistributed extends BaseTestQuery {
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestTpchDistributed.class);
 
-  private void testDistributed(String fileName) throws Exception{
-    String query = getFile(fileName);
+  private static void testDistributed(final String fileName) throws Exception {
+    final String query = getFile(fileName);
     test("alter session set `planner.slice_target` = 10; " + query);
   }
 
@@ -80,7 +80,6 @@ public class TestTpchDistributed extends BaseTestQuery{
   }
 
   @Test
-  @Ignore // cartesion problem
   public void tpch11() throws Exception{
     testDistributed("queries/tpch/11.sql");
   }
@@ -101,7 +100,6 @@ public class TestTpchDistributed extends BaseTestQuery{
   }
 
   @Test
-  @Ignore // non-equality join
   public void tpch15() throws Exception{
     testDistributed("queries/tpch/15.sql");
   }
@@ -112,7 +110,6 @@ public class TestTpchDistributed extends BaseTestQuery{
   }
 
   @Test
-  @Ignore // non-equality join
   public void tpch17() throws Exception{
     testDistributed("queries/tpch/17.sql");
   }

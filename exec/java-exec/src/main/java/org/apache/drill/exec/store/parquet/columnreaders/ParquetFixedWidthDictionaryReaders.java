@@ -18,7 +18,6 @@
 package org.apache.drill.exec.store.parquet.columnreaders;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
-
 import org.apache.drill.exec.vector.BigIntVector;
 import org.apache.drill.exec.vector.Decimal18Vector;
 import org.apache.drill.exec.vector.Decimal9Vector;
@@ -27,111 +26,139 @@ import org.apache.drill.exec.vector.Float8Vector;
 import org.apache.drill.exec.vector.IntVector;
 import org.apache.drill.exec.vector.TimeStampVector;
 import org.apache.drill.exec.vector.TimeVector;
-import parquet.column.ColumnDescriptor;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.drill.exec.vector.VarBinaryVector;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.io.api.Binary;
 
 public class ParquetFixedWidthDictionaryReaders {
 
-  static class DictionaryIntReader extends FixedByteAlignedReader {
-
-    IntVector castedVector;
-
+  static class DictionaryIntReader extends FixedByteAlignedReader<IntVector> {
     DictionaryIntReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                                 ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, IntVector v,
                                 SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
           - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       if (usingDictionary) {
         for (int i = 0; i < recordsReadInThisIteration; i++){
-          castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
+          valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
         }
       }
     }
   }
 
-  static class DictionaryDecimal9Reader extends FixedByteAlignedReader {
+  static class DictionaryFixedBinaryReader extends FixedByteAlignedReader<VarBinaryVector> {
+    DictionaryFixedBinaryReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
+                        ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, VarBinaryVector v,
+                        SchemaElement schemaElement) throws ExecutionSetupException {
+      super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
+    }
 
-    Decimal9Vector castedVector;
+    // this method is called by its superclass during a read loop
+    @Override
+    protected void readField(long recordsToReadInThisPass) {
 
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
+          - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
+      readLengthInBits = recordsReadInThisIteration * dataTypeLengthInBits;
+      readLength = (int) Math.ceil(readLengthInBits / 8.0);
+
+      if (usingDictionary) {
+        VarBinaryVector.Mutator mutator =  valueVec.getMutator();
+        Binary currDictValToWrite = null;
+        for (int i = 0; i < recordsReadInThisIteration; i++){
+          currDictValToWrite = pageReader.dictionaryValueReader.readBytes();
+          mutator.setSafe(valuesReadInCurrentPass + i, currDictValToWrite.toByteBuffer(), 0,
+              currDictValToWrite.length());
+        }
+        // Set the write Index. The next page that gets read might be a page that does not use dictionary encoding
+        // and we will go into the else condition below. The readField method of the parent class requires the
+        // writer index to be set correctly.
+        int writerIndex = valueVec.getBuffer().writerIndex();
+        valueVec.getBuffer().setIndex(0, writerIndex + (int)readLength);
+      } else {
+        super.readField(recordsToReadInThisPass);
+      }
+
+      // TODO - replace this with fixed binary type in drill
+      // now we need to write the lengths of each value
+      int byteLength = dataTypeLengthInBits / 8;
+      for (int i = 0; i < recordsToReadInThisPass; i++) {
+        valueVec.getMutator().setValueLengthSafe(valuesReadInCurrentPass + i, byteLength);
+      }
+    }
+  }
+
+  static class DictionaryDecimal9Reader extends FixedByteAlignedReader<Decimal9Vector> {
     DictionaryDecimal9Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                         ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, Decimal9Vector v,
                         SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
         - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       if (usingDictionary) {
         for (int i = 0; i < recordsReadInThisIteration; i++){
-          castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
+          valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
         }
       }
     }
   }
 
-  static class DictionaryTimeReader extends FixedByteAlignedReader {
-
-    TimeVector castedVector;
-
+  static class DictionaryTimeReader extends FixedByteAlignedReader<TimeVector> {
     DictionaryTimeReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                         ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, TimeVector v,
                         SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
         - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       if (usingDictionary) {
         for (int i = 0; i < recordsReadInThisIteration; i++){
-          castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
+          valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readInteger());
         }
       }
     }
   }
 
-  static class DictionaryBigIntReader extends FixedByteAlignedReader {
-
-    BigIntVector castedVector;
-
+  static class DictionaryBigIntReader extends FixedByteAlignedReader<BigIntVector> {
     DictionaryBigIntReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                                    ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, BigIntVector v,
                                    SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
           - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       for (int i = 0; i < recordsReadInThisIteration; i++){
         try {
-        castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
+        valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
         } catch ( Exception ex) {
           throw ex;
         }
@@ -139,27 +166,23 @@ public class ParquetFixedWidthDictionaryReaders {
     }
   }
 
-  static class DictionaryDecimal18Reader extends FixedByteAlignedReader {
-
-    Decimal18Vector castedVector;
-
+  static class DictionaryDecimal18Reader extends FixedByteAlignedReader<Decimal18Vector> {
     DictionaryDecimal18Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                            ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, Decimal18Vector v,
                            SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
         - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       for (int i = 0; i < recordsReadInThisIteration; i++){
         try {
-          castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
+          valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
         } catch ( Exception ex) {
           throw ex;
         }
@@ -167,27 +190,23 @@ public class ParquetFixedWidthDictionaryReaders {
     }
   }
 
-  static class DictionaryTimeStampReader extends FixedByteAlignedReader {
-
-    TimeStampVector castedVector;
-
+  static class DictionaryTimeStampReader extends FixedByteAlignedReader<TimeStampVector> {
     DictionaryTimeStampReader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                            ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, TimeStampVector v,
                            SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
 
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
         - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       for (int i = 0; i < recordsReadInThisIteration; i++){
         try {
-          castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
+          valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readLong());
         } catch ( Exception ex) {
           throw ex;
         }
@@ -195,48 +214,40 @@ public class ParquetFixedWidthDictionaryReaders {
     }
   }
 
-  static class DictionaryFloat4Reader extends FixedByteAlignedReader {
-
-    Float4Vector castedVector;
-
+  static class DictionaryFloat4Reader extends FixedByteAlignedReader<Float4Vector> {
     DictionaryFloat4Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                                    ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, Float4Vector v,
                                    SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
           - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       for (int i = 0; i < recordsReadInThisIteration; i++){
-        castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readFloat());
+        valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readFloat());
       }
     }
   }
 
-  static class DictionaryFloat8Reader extends FixedByteAlignedReader {
-
-    Float8Vector castedVector;
-
+  static class DictionaryFloat8Reader extends FixedByteAlignedReader<Float8Vector> {
     DictionaryFloat8Reader(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                                    ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, Float8Vector v,
                                    SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
-      castedVector = v;
     }
 
     // this method is called by its superclass during a read loop
     @Override
     protected void readField(long recordsToReadInThisPass) {
-      recordsReadInThisIteration = Math.min(pageReader.currentPage.getValueCount()
+      recordsReadInThisIteration = Math.min(pageReader.currentPageCount
           - pageReader.valuesRead, recordsToReadInThisPass - valuesReadInCurrentPass);
 
       for (int i = 0; i < recordsReadInThisIteration; i++){
-        castedVector.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readDouble());
+        valueVec.getMutator().setSafe(valuesReadInCurrentPass + i, pageReader.dictionaryValueReader.readDouble());
       }
     }
   }

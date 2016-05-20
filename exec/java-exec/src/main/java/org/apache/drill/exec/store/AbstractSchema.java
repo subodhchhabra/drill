@@ -17,24 +17,28 @@
  */
 package org.apache.drill.exec.store;
 
+import java.io.IOException;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
-import net.hydromatic.linq4j.expressions.DefaultExpression;
-import net.hydromatic.linq4j.expressions.Expression;
-import net.hydromatic.optiq.Function;
-import net.hydromatic.optiq.Schema;
-import net.hydromatic.optiq.SchemaPlus;
-import net.hydromatic.optiq.Table;
-
+import org.apache.calcite.linq4j.tree.DefaultExpression;
+import org.apache.calcite.linq4j.tree.Expression;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.schema.Function;
+import org.apache.calcite.schema.Schema;
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.Table;
+import org.apache.commons.lang3.tuple.Pair;
+import org.apache.drill.common.exceptions.UserException;
+import org.apache.drill.exec.dotdrill.View;
 import org.apache.drill.exec.planner.logical.CreateTableEntry;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 
-public abstract class AbstractSchema implements Schema{
+public abstract class AbstractSchema implements Schema, SchemaPartitionExplorer, AutoCloseable {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(AbstractSchema.class);
 
   protected final List<String> schemaPath;
@@ -46,6 +50,17 @@ public abstract class AbstractSchema implements Schema{
     schemaPath.addAll(parentSchemaPath);
     schemaPath.add(name);
     this.name = name;
+  }
+
+  @Override
+  public Iterable<String> getSubPartitions(String table,
+                                           List<String> partitionColumns,
+                                           List<String> partitionValues
+                                          ) throws PartitionNotFoundException {
+    throw new UnsupportedOperationException(
+        String.format("Schema of type: %s " +
+                      "does not support retrieving sub-partition information.",
+                      this.getClass().getSimpleName()));
   }
 
   public String getName() {
@@ -73,14 +88,55 @@ public abstract class AbstractSchema implements Schema{
    *
    * @return Return the default schema where tables are created or retrieved from.
    */
-  public AbstractSchema getDefaultSchema() {
+  public Schema getDefaultSchema() {
     return this;
   }
 
-  public CreateTableEntry createNewTable(String tableName) {
-    throw new UnsupportedOperationException("New tables are not allowed in this schema");
+  /**
+   * Create a new view given definition.
+   * @param view View info including name, definition etc.
+   * @return Returns true if an existing view is replaced with the given view. False otherwise.
+   * @throws IOException
+   */
+  public boolean createView(View view) throws IOException {
+    throw UserException.unsupportedError()
+        .message("Creating new view is not supported in schema [%s]", getSchemaPath())
+        .build(logger);
   }
 
+  /**
+   * Drop the view with given name.
+   *
+   * @param viewName
+   * @throws IOException
+   */
+  public void dropView(String viewName) throws IOException {
+    throw UserException.unsupportedError()
+        .message("Dropping a view is supported in schema [%s]", getSchemaPath())
+        .build(logger);
+  }
+
+  /**
+   *
+   * @param tableName : new table name.
+   * @param partitionColumns : list of partition columns. Empty list if there is no partition columns.
+   * @return
+   */
+  public CreateTableEntry createNewTable(String tableName, List<String> partitionColumns) {
+    throw UserException.unsupportedError()
+        .message("Creating new tables is not supported in schema [%s]", getSchemaPath())
+        .build(logger);
+  }
+
+  /**
+   * Reports whether to show items from this schema in INFORMATION_SCHEMA
+   * tables.
+   * (Controls ... TODO:  Doc.:  Mention what this typically controls or
+   * affects.)
+   * <p>
+   *   This base implementation returns {@code true}.
+   * </p>
+   */
   public boolean showInInformationSchema() {
     return true;
   }
@@ -130,5 +186,49 @@ public abstract class AbstractSchema implements Schema{
     return true;
   }
 
+  @Override
+  public void close() throws Exception {
+    // no-op: default implementation for most implementations.
+  }
 
+  public void dropTable(String tableName) {
+    throw UserException.unsupportedError()
+        .message("Dropping tables is not supported in schema [%s]", getSchemaPath())
+        .build(logger);
+  }
+
+  /**
+   * Get the collection of {@link Table} tables specified in the tableNames with bulk-load (if the underlying storage
+   * plugin supports).
+   * It is not guaranteed that the retrieved tables would have RowType and Statistic being fully populated.
+   *
+   * Specifically, calling {@link Table#getRowType(RelDataTypeFactory)} or {@link Table#getStatistic()} might incur
+   * {@link UnsupportedOperationException} being thrown.
+   *
+   * @param  tableNames the requested tables, specified by the table names
+   * @return the collection of requested tables
+   */
+  public List<Pair<String, ? extends Table>> getTablesByNamesByBulkLoad(final List<String> tableNames) {
+    return getTablesByNames(tableNames);
+  }
+
+  /**
+   * Get the collection of {@link Table} tables specified in the tableNames.
+   *
+   * @param  tableNames the requested tables, specified by the table names
+   * @return the collection of requested tables
+   */
+  public List<Pair<String, ? extends Table>> getTablesByNames(final List<String> tableNames) {
+    final List<Pair<String, ? extends Table>> tables = Lists.newArrayList();
+    for (String tableName : tableNames) {
+      final Table table = getTable(tableName);
+      if (table == null) {
+        // Schema may return NULL for table if the query user doesn't have permissions to load the table. Ignore such
+        // tables as INFO SCHEMA is about showing tables which the use has access to query.
+        continue;
+      }
+      tables.add(Pair.of(tableName, table));
+    }
+    return tables;
+  }
 }

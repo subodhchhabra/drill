@@ -18,6 +18,7 @@
 package org.apache.drill.exec.physical.impl.join;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.drill.common.expression.FieldReference;
@@ -31,10 +32,10 @@ import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.compile.sig.GeneratorMapping;
 import org.apache.drill.exec.compile.sig.MappingSet;
 import org.apache.drill.exec.exception.ClassTransformationException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.ClassGenerator;
 import org.apache.drill.exec.expr.CodeGenerator;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.MetricDef;
 import org.apache.drill.exec.physical.config.HashJoinPOP;
@@ -56,14 +57,13 @@ import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.record.VectorWrapper;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.complex.AbstractContainerVector;
-import org.eigenbase.rel.JoinRelType;
+import org.apache.calcite.rel.core.JoinRelType;
 
 import com.sun.codemodel.JExpr;
 import com.sun.codemodel.JExpression;
 import com.sun.codemodel.JVar;
 
 public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
-
   public static final long ALLOCATOR_INITIAL_RESERVATION = 1 * 1024 * 1024;
   public static final long ALLOCATOR_MAX_RESERVATION = 20L * 1000 * 1000 * 1000;
 
@@ -171,12 +171,23 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
   protected void buildSchema() throws SchemaChangeException {
     leftUpstream = next(left);
     rightUpstream = next(right);
+
+    if (leftUpstream == IterOutcome.STOP || rightUpstream == IterOutcome.STOP) {
+      state = BatchState.STOP;
+      return;
+    }
+
+    if (leftUpstream == IterOutcome.OUT_OF_MEMORY || rightUpstream == IterOutcome.OUT_OF_MEMORY) {
+      state = BatchState.OUT_OF_MEMORY;
+      return;
+    }
+
     // Initialize the hash join helper context
     hjHelper = new HashJoinHelper(context, oContext.getAllocator());
     try {
       rightSchema = right.getSchema();
-      VectorContainer vectors = new VectorContainer(oContext);
-      for (VectorWrapper w : right) {
+      final VectorContainer vectors = new VectorContainer(oContext);
+      for (final VectorWrapper<?> w : right) {
         vectors.addOrGet(w.getField());
       }
       vectors.buildSchema(SelectionVectorMode.NONE);
@@ -187,7 +198,7 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
       setupHashTable();
       hashJoinProbe = setupHashJoinProbe();
       // Build the container schema and set the counts
-      for (VectorWrapper w : container) {
+      for (final VectorWrapper<?> w : container) {
         w.getValueVector().allocateNew();
       }
       container.buildSchema(BatchSchema.SelectionVectorMode.NONE);
@@ -215,7 +226,7 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
       }
 
       // Store the number of records projected
-      if (hashTable != null || joinType != JoinRelType.INNER) {
+      if (!hashTable.isEmpty() || joinType != JoinRelType.INNER) {
 
         // Allocate the memory for the vectors in the output container
         allocateVectors();
@@ -232,8 +243,7 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
             state = BatchState.NOT_FIRST;
           }
 
-
-          for (VectorWrapper<?> v : container) {
+          for (final VectorWrapper<?> v : container) {
             v.getValueVector().getMutator().setValueCount(outputRecords);
           }
 
@@ -242,13 +252,13 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
       } else {
         // Our build side is empty, we won't have any matches, clear the probe side
         if (leftUpstream == IterOutcome.OK_NEW_SCHEMA || leftUpstream == IterOutcome.OK) {
-          for (VectorWrapper<?> wrapper : left) {
+          for (final VectorWrapper<?> wrapper : left) {
             wrapper.getValueVector().clear();
           }
           left.kill(true);
           leftUpstream = next(HashJoinHelper.LEFT_INPUT, left);
           while (leftUpstream == IterOutcome.OK_NEW_SCHEMA || leftUpstream == IterOutcome.OK) {
-            for (VectorWrapper<?> wrapper : left) {
+            for (final VectorWrapper<?> wrapper : left) {
               wrapper.getValueVector().clear();
             }
             leftUpstream = next(HashJoinHelper.LEFT_INPUT, left);
@@ -270,25 +280,23 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
   }
 
   public void setupHashTable() throws IOException, SchemaChangeException, ClassTransformationException {
-
     // Setup the hash table configuration object
     int conditionsSize = conditions.size();
-
-    NamedExpression rightExpr[] = new NamedExpression[conditionsSize];
-    NamedExpression leftExpr[] = new NamedExpression[conditionsSize];
+    final List<NamedExpression> rightExpr = new ArrayList<>(conditionsSize);
+    List<NamedExpression> leftExpr = new ArrayList<>(conditionsSize);
 
     JoinComparator comparator = JoinComparator.NONE;
     // Create named expressions from the conditions
     for (int i = 0; i < conditionsSize; i++) {
-      rightExpr[i] = new NamedExpression(conditions.get(i).getRight(), new FieldReference("build_side_" + i));
-      leftExpr[i] = new NamedExpression(conditions.get(i).getLeft(), new FieldReference("probe_side_" + i));
+      rightExpr.add(new NamedExpression(conditions.get(i).getRight(), new FieldReference("build_side_" + i)));
+      leftExpr.add(new NamedExpression(conditions.get(i).getLeft(), new FieldReference("probe_side_" + i)));
 
       // Hash join only supports certain types of comparisons
       comparator = JoinUtils.checkAndSetComparison(conditions.get(i), comparator);
     }
 
     assert comparator != JoinComparator.NONE;
-    boolean areNullsEqual = (comparator == JoinComparator.IS_NOT_DISTINCT_FROM) ? true : false;
+    final boolean areNullsEqual = (comparator == JoinComparator.IS_NOT_DISTINCT_FROM) ? true : false;
 
     // Set the left named expression to be null if the probe batch is empty.
     if (leftUpstream != IterOutcome.OK_NEW_SCHEMA && leftUpstream != IterOutcome.OK) {
@@ -299,24 +307,23 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
       }
     }
 
-    HashTableConfig htConfig =
-        new HashTableConfig(context.getOptions().getOption(ExecConstants.MIN_HASH_TABLE_SIZE_KEY).num_val.intValue(),
+    final HashTableConfig htConfig =
+        new HashTableConfig((int) context.getOptions().getOption(ExecConstants.MIN_HASH_TABLE_SIZE),
             HashTable.DEFAULT_LOAD_FACTOR, rightExpr, leftExpr);
 
     // Create the chained hash table
-    ChainedHashTable ht =
+    final ChainedHashTable ht =
         new ChainedHashTable(htConfig, context, oContext.getAllocator(), this.right, this.left, null,
             areNullsEqual);
     hashTable = ht.createAndSetupHashTable(null);
   }
 
   public void executeBuildPhase() throws SchemaChangeException, ClassTransformationException, IOException {
-
     //Setup the underlying hash table
 
     // skip first batch if count is zero, as it may be an empty schema batch
     if (right.getRecordCount() == 0) {
-      for (VectorWrapper w : right) {
+      for (final VectorWrapper<?> w : right) {
         w.clear();
       }
       rightUpstream = next(right);
@@ -325,9 +332,8 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
     boolean moreData = true;
 
     while (moreData) {
-
       switch (rightUpstream) {
-
+      case OUT_OF_MEMORY:
       case NONE:
       case NOT_YET:
       case STOP:
@@ -350,7 +356,7 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
         }
         // Fall through
       case OK:
-        int currentRecordCount = right.getRecordCount();
+        final int currentRecordCount = right.getRecordCount();
 
                     /* For every new build batch, we store some state in the helper context
                      * Add new state to the helper context
@@ -358,11 +364,10 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
         hjHelper.addNewBatch(currentRecordCount);
 
         // Holder contains the global index where the key is hashed into using the hash table
-        IndexPointer htIndex = new IndexPointer();
+        final IndexPointer htIndex = new IndexPointer();
 
         // For every record in the build batch , hash the key columns
         for (int i = 0; i < currentRecordCount; i++) {
-
           hashTable.put(i, htIndex, 1 /* retry count */);
 
                         /* Use the global index returned by the hash table, to store
@@ -376,15 +381,23 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
                      * to the hyper vector container. Will be used when we want to retrieve
                      * records that have matching keys on the probe side.
                      */
-        RecordBatchData nextBatch = new RecordBatchData(right);
-        if (hyperContainer == null) {
-          hyperContainer = new ExpandableHyperContainer(nextBatch.getContainer());
-        } else {
-          hyperContainer.addBatch(nextBatch.getContainer());
-        }
+        final RecordBatchData nextBatch = new RecordBatchData(right, oContext.getAllocator());
+        boolean success = false;
+        try {
+          if (hyperContainer == null) {
+            hyperContainer = new ExpandableHyperContainer(nextBatch.getContainer());
+          } else {
+            hyperContainer.addBatch(nextBatch.getContainer());
+          }
 
-        // completed processing a batch, increment batch index
-        buildBatchIndex++;
+          // completed processing a batch, increment batch index
+          buildBatchIndex++;
+          success = true;
+        } finally {
+          if (!success) {
+            nextBatch.clear();
+          }
+        }
         break;
       }
       // Get the next record batch
@@ -392,30 +405,25 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
     }
   }
 
-
   public HashJoinProbe setupHashJoinProbe() throws ClassTransformationException, IOException {
-
-
     final CodeGenerator<HashJoinProbe> cg = CodeGenerator.get(HashJoinProbe.TEMPLATE_DEFINITION, context.getFunctionRegistry());
-    ClassGenerator<HashJoinProbe> g = cg.getRoot();
+    final ClassGenerator<HashJoinProbe> g = cg.getRoot();
 
     // Generate the code to project build side records
     g.setMappingSet(projectBuildMapping);
 
-
     int fieldId = 0;
-    JExpression buildIndex = JExpr.direct("buildIndex");
-    JExpression outIndex = JExpr.direct("outIndex");
+    final JExpression buildIndex = JExpr.direct("buildIndex");
+    final JExpression outIndex = JExpr.direct("outIndex");
     g.rotateBlock();
 
     if (rightSchema != null) {
-      for (MaterializedField field : rightSchema) {
-
-        MajorType inputType = field.getType();
-        MajorType outputType;
-        // If left join, then the output type must be nullable. However, map types are
+      for (final MaterializedField field : rightSchema) {
+        final MajorType inputType = field.getType();
+        final MajorType outputType;
+        // If left or full outer join, then the output type must be nullable. However, map types are
         // not nullable so we must exclude them from the check below (see DRILL-2197).
-        if (joinType == JoinRelType.LEFT && inputType.getMode() == DataMode.REQUIRED
+        if ((joinType == JoinRelType.LEFT || joinType == JoinRelType.FULL) && inputType.getMode() == DataMode.REQUIRED
             && inputType.getMinorType() != TypeProtos.MinorType.MAP) {
           outputType = Types.overrideMode(inputType, DataMode.OPTIONAL);
         } else {
@@ -423,12 +431,12 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
         }
 
         // make sure to project field with children for children to show up in the schema
-        final MaterializedField projected = field.cloneWithType(outputType);
+        final MaterializedField projected = field.withType(outputType);
         // Add the vector to our output container
         container.addOrGet(projected);
 
-        JVar inVV = g.declareVectorValueSetupAndMember("buildBatch", new TypedFieldId(field.getType(), true, fieldId));
-        JVar outVV = g.declareVectorValueSetupAndMember("outgoing", new TypedFieldId(outputType, false, fieldId));
+        final JVar inVV = g.declareVectorValueSetupAndMember("buildBatch", new TypedFieldId(field.getType(), true, fieldId));
+        final JVar outVV = g.declareVectorValueSetupAndMember("outgoing", new TypedFieldId(outputType, false, fieldId));
         g.getEvalBlock().add(outVV.invoke("copyFromSafe")
             .arg(buildIndex.band(JExpr.lit((int) Character.MAX_VALUE)))
             .arg(outIndex)
@@ -443,44 +451,44 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
 
     int outputFieldId = fieldId;
     fieldId = 0;
-    JExpression probeIndex = JExpr.direct("probeIndex");
-    int recordCount = 0;
+    final JExpression probeIndex = JExpr.direct("probeIndex");
 
     if (leftUpstream == IterOutcome.OK || leftUpstream == IterOutcome.OK_NEW_SCHEMA) {
-      for (VectorWrapper<?> vv : left) {
+      for (final VectorWrapper<?> vv : left) {
+        final MajorType inputType = vv.getField().getType();
+        final MajorType outputType;
 
-        MajorType inputType = vv.getField().getType();
-        MajorType outputType;
-        if (joinType == JoinRelType.RIGHT && inputType.getMode() == DataMode.REQUIRED) {
+        // If right or full outer join then the output type should be optional. However, map types are
+        // not nullable so we must exclude them from the check below (see DRILL-2771, DRILL-2197).
+        if ((joinType == JoinRelType.RIGHT || joinType == JoinRelType.FULL) && inputType.getMode() == DataMode.REQUIRED
+            && inputType.getMinorType() != TypeProtos.MinorType.MAP) {
           outputType = Types.overrideMode(inputType, DataMode.OPTIONAL);
         } else {
           outputType = inputType;
         }
 
-        ValueVector v = container.addOrGet(MaterializedField.create(vv.getField().getPath(), outputType));
+        final ValueVector v = container.addOrGet(MaterializedField.create(vv.getField().getPath(), outputType));
         if (v instanceof AbstractContainerVector) {
           vv.getValueVector().makeTransferPair(v);
           v.clear();
         }
 
-        JVar inVV = g.declareVectorValueSetupAndMember("probeBatch", new TypedFieldId(inputType, false, fieldId));
-        JVar outVV = g.declareVectorValueSetupAndMember("outgoing", new TypedFieldId(outputType, false, outputFieldId));
+        final JVar inVV = g.declareVectorValueSetupAndMember("probeBatch", new TypedFieldId(inputType, false, fieldId));
+        final JVar outVV = g.declareVectorValueSetupAndMember("outgoing", new TypedFieldId(outputType, false, outputFieldId));
 
         g.getEvalBlock().add(outVV.invoke("copyFromSafe").arg(probeIndex).arg(outIndex).arg(inVV));
 
         fieldId++;
         outputFieldId++;
       }
-      recordCount = left.getRecordCount();
     }
 
-    HashJoinProbe hj = context.getImplementationClass(cg);
-
+    final HashJoinProbe hj = context.getImplementationClass(cg);
     return hj;
   }
 
   private void allocateVectors() {
-    for (VectorWrapper<?> v : container) {
+    for (final VectorWrapper<?> v : container) {
       v.getValueVector().allocateNew();
     }
   }
@@ -490,8 +498,8 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
     super(popConfig, context, true);
     this.left = left;
     this.right = right;
-    this.joinType = popConfig.getJoinType();
-    this.conditions = popConfig.getConditions();
+    joinType = popConfig.getJoinType();
+    conditions = popConfig.getConditions();
   }
 
   private void updateStats(HashTable htable) {
@@ -499,20 +507,20 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
       return;
     }
     htable.getStats(htStats);
-    this.stats.setLongStat(Metric.NUM_BUCKETS, htStats.numBuckets);
-    this.stats.setLongStat(Metric.NUM_ENTRIES, htStats.numEntries);
-    this.stats.setLongStat(Metric.NUM_RESIZING, htStats.numResizing);
-    this.stats.setLongStat(Metric.RESIZING_TIME, htStats.resizingTime);
+    stats.setLongStat(Metric.NUM_BUCKETS, htStats.numBuckets);
+    stats.setLongStat(Metric.NUM_ENTRIES, htStats.numEntries);
+    stats.setLongStat(Metric.NUM_RESIZING, htStats.numResizing);
+    stats.setLongStat(Metric.RESIZING_TIME, htStats.resizingTime);
   }
 
   @Override
   public void killIncoming(boolean sendUpstream) {
-    this.left.kill(sendUpstream);
-    this.right.kill(sendUpstream);
+    left.kill(sendUpstream);
+    right.kill(sendUpstream);
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     if (hjHelper != null) {
       hjHelper.clear();
     }
@@ -525,9 +533,6 @@ public class HashJoinBatch extends AbstractRecordBatch<HashJoinPOP> {
     if (hashTable != null) {
       hashTable.clear();
     }
-    super.cleanup();
-    right.cleanup();
-    left.cleanup();
+    super.close();
   }
-
 }

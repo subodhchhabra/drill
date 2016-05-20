@@ -45,6 +45,7 @@ import com.sun.codemodel.JExpr;
 import com.sun.codemodel.JInvocation;
 import com.sun.codemodel.JTryBlock;
 import com.sun.codemodel.JVar;
+import org.apache.hadoop.hive.serde2.objectinspector.PrimitiveObjectInspector;
 
 public class HiveFuncHolder extends AbstractFuncHolder {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FunctionImplementationRegistry.class);
@@ -188,7 +189,9 @@ public class HiveFuncHolder extends AbstractFuncHolder {
         oiArray.component(JExpr.lit(i)),
         oih.staticInvoke("getDrillObjectInspector")
           .arg(mode.staticInvoke("valueOf").arg(JExpr.lit(argTypes[i].getMode().getNumber())))
-          .arg(mt.staticInvoke("valueOf").arg(JExpr.lit(argTypes[i].getMinorType().getNumber()))));
+          .arg(mt.staticInvoke("valueOf").arg(JExpr.lit(argTypes[i].getMinorType().getNumber())))
+          .arg((((PrimitiveObjectInspector) returnOI).getPrimitiveCategory() ==
+              PrimitiveObjectInspector.PrimitiveCategory.STRING) ? JExpr.lit(true) : JExpr.lit(false)));
     }
 
     // declare and instantiate DeferredObject array
@@ -242,11 +245,11 @@ public class HiveFuncHolder extends AbstractFuncHolder {
     // initialize DeferredObject's. For an optional type, assign the value holder only if it is not null
     for(int i=0; i<argTypes.length; i++) {
       if (inputVariables[i].isOptional()) {
+        sub.assign(workspaceJVars[3].component(JExpr.lit(i)), workspaceJVars[2].component(JExpr.lit(i)));
         JBlock conditionalBlock = new JBlock(false, false);
         JConditional jc = conditionalBlock._if(inputVariables[i].getIsSet().ne(JExpr.lit(0)));
-        jc._then().assign(workspaceJVars[3].component(JExpr.lit(i)), workspaceJVars[2].component(JExpr.lit(i)));
         jc._then().assign(JExpr.ref(workspaceJVars[3].component(JExpr.lit(i)), "valueHolder"), inputVariables[i].getHolder());
-        jc._else().assign(workspaceJVars[3].component(JExpr.lit(i)), JExpr._null());
+        jc._else().assign(JExpr.ref(workspaceJVars[3].component(JExpr.lit(i)), "valueHolder"), JExpr._null());
         sub.add(conditionalBlock);
       } else {
         sub.assign(workspaceJVars[3].component(JExpr.lit(i)), workspaceJVars[2].component(JExpr.lit(i)));

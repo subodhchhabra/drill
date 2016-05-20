@@ -18,18 +18,15 @@
 package org.apache.drill.exec.physical.impl.common;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 
+import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.expression.ErrorCollector;
 import org.apache.drill.common.expression.ErrorCollectorImpl;
 import org.apache.drill.common.expression.LogicalExpression;
-import org.apache.drill.common.expression.FunctionCall;
-import org.apache.drill.common.expression.ExpressionPosition;
-import org.apache.drill.common.exceptions.DrillRuntimeException;
-import org.apache.drill.common.expression.ValueExpressions;
 import org.apache.drill.common.logical.data.NamedExpression;
-import org.apache.drill.common.types.TypeProtos;
 import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.common.types.Types;
 import org.apache.drill.exec.compile.sig.GeneratorMapping;
@@ -46,12 +43,15 @@ import org.apache.drill.exec.expr.ValueVectorWriteExpression;
 import org.apache.drill.exec.expr.fn.FunctionGenerationHelper;
 import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.ops.FragmentContext;
+import org.apache.drill.exec.physical.impl.join.JoinUtils;
+import org.apache.drill.exec.planner.physical.HashPrelUtil;
+import org.apache.drill.exec.planner.physical.PrelUtil;
 import org.apache.drill.exec.record.MaterializedField;
 import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.record.TypedFieldId;
+import org.apache.drill.exec.record.VectorAccessible;
 import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.resolver.TypeCastRules;
-import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.ValueVector;
 
 import com.sun.codemodel.JConditional;
@@ -143,17 +143,17 @@ public class ChainedHashTable {
     ClassGenerator<HashTable> cg = top.getRoot();
     ClassGenerator<HashTable> cgInner = cg.getInnerGenerator("BatchHolder");
 
-    LogicalExpression[] keyExprsBuild = new LogicalExpression[htConfig.getKeyExprsBuild().length];
+    LogicalExpression[] keyExprsBuild = new LogicalExpression[htConfig.getKeyExprsBuild().size()];
     LogicalExpression[] keyExprsProbe = null;
     boolean isProbe = (htConfig.getKeyExprsProbe() != null);
     if (isProbe) {
-      keyExprsProbe = new LogicalExpression[htConfig.getKeyExprsProbe().length];
+      keyExprsProbe = new LogicalExpression[htConfig.getKeyExprsProbe().size()];
     }
 
     ErrorCollector collector = new ErrorCollectorImpl();
     VectorContainer htContainerOrig = new VectorContainer(); // original ht container from which others may be cloned
-    LogicalExpression[] htKeyExprs = new LogicalExpression[htConfig.getKeyExprsBuild().length];
-    TypedFieldId[] htKeyFieldIds = new TypedFieldId[htConfig.getKeyExprsBuild().length];
+    LogicalExpression[] htKeyExprs = new LogicalExpression[htConfig.getKeyExprsBuild().size()];
+    TypedFieldId[] htKeyFieldIds = new TypedFieldId[htConfig.getKeyExprsBuild().size()];
 
     int i = 0;
     for (NamedExpression ne : htConfig.getKeyExprsBuild()) {
@@ -165,12 +165,6 @@ public class ChainedHashTable {
         continue;
       }
       keyExprsBuild[i] = expr;
-
-      final MaterializedField outputField = MaterializedField.create(ne.getRef(), expr.getMajorType());
-      // create a type-specific ValueVector for this key
-      ValueVector vv = TypeHelper.getNewVector(outputField, allocator);
-      htKeyFieldIds[i] = htContainerOrig.add(vv);
-
       i++;
     }
 
@@ -187,7 +181,26 @@ public class ChainedHashTable {
         keyExprsProbe[i] = expr;
         i++;
       }
+      JoinUtils.addLeastRestrictiveCasts(keyExprsProbe, incomingProbe, keyExprsBuild, incomingBuild, context);
     }
+
+    i = 0;
+    /*
+     * Once the implicit casts have been added, create the value vectors for the corresponding
+     * type and add it to the hash table's container.
+     * Note: Adding implicit casts may have a minor impact on the memory foot print. For example
+     * if we have a join condition with bigint on the probe side and int on the build side then
+     * after this change we will be allocating a bigint vector in the hashtable instead of an int
+     * vector.
+     */
+    for (NamedExpression ne : htConfig.getKeyExprsBuild()) {
+      LogicalExpression expr = keyExprsBuild[i];
+      final MaterializedField outputField = MaterializedField.create(ne.getRef().getAsUnescapedPath(), expr.getMajorType());
+      ValueVector vv = TypeHelper.getNewVector(outputField, allocator);
+      htKeyFieldIds[i] = htContainerOrig.add(vv);
+      i++;
+    }
+
 
     // generate code for isKeyMatch(), setValue(), getHash() and outputRecordKeys()
     setupIsKeyMatchInternal(cgInner, KeyMatchIncomingBuildMapping, KeyMatchHtableMapping, keyExprsBuild, htKeyFieldIds);
@@ -197,23 +210,14 @@ public class ChainedHashTable {
     setupSetValue(cgInner, keyExprsBuild, htKeyFieldIds);
     if (outgoing != null) {
 
-      if (outKeyFieldIds.length > htConfig.getKeyExprsBuild().length) {
+      if (outKeyFieldIds.length > htConfig.getKeyExprsBuild().size()) {
         throw new IllegalArgumentException("Mismatched number of output key fields.");
       }
     }
     setupOutputRecordKeys(cgInner, htKeyFieldIds, outKeyFieldIds);
 
-    /* Before generating the code for hashing the build and probe expressions
-     * examine the expressions to make sure they are of the same type, add casts if necessary.
-     * If they are not of the same type, hashing the same value of different types will yield different hash values.
-     * NOTE: We add the cast only for the hash function, comparator function can handle the case
-     * when expressions are different (for eg we have comparator functions that compare bigint and float8)
-     * However for the hash to work correctly we would need to apply the cast.
-     */
-    addLeastRestrictiveCasts(keyExprsBuild, keyExprsProbe);
-
-    setupGetHash(cg /* use top level code generator for getHash */, GetHashIncomingBuildMapping, keyExprsBuild, false);
-    setupGetHash(cg /* use top level code generator for getHash */, GetHashIncomingProbeMapping, keyExprsProbe, true);
+    setupGetHash(cg /* use top level code generator for getHash */, GetHashIncomingBuildMapping, incomingBuild, keyExprsBuild, false);
+    setupGetHash(cg /* use top level code generator for getHash */, GetHashIncomingProbeMapping, incomingProbe, keyExprsProbe, true);
 
     HashTable ht = context.getImplementationClass(top);
     ht.setup(htConfig, context, allocator, incomingBuild, incomingProbe, outgoing, htContainerOrig);
@@ -289,59 +293,13 @@ public class ChainedHashTable {
         ValueVectorReadExpression vvrExpr = new ValueVectorReadExpression(htKeyFieldIds[i]);
         boolean useSetSafe = !Types.isFixedWidthType(vvrExpr.getMajorType()) || Types.isRepeated(vvrExpr.getMajorType());
         ValueVectorWriteExpression vvwExpr = new ValueVectorWriteExpression(outKeyFieldIds[i], vvrExpr, useSetSafe);
-        cg.addExpr(vvwExpr);
+        cg.addExpr(vvwExpr, true);
       }
 
     }
   }
 
-  private void addLeastRestrictiveCasts(LogicalExpression[] keyExprsBuild, LogicalExpression[] keyExprsProbe) {
-
-    // If we don't have probe expressions then nothing to do get out
-    if (keyExprsProbe == null) {
-      return;
-    }
-
-    assert keyExprsBuild.length == keyExprsProbe.length;
-
-    for (int i = 0; i < keyExprsBuild.length; i++) {
-      LogicalExpression buildExpr = keyExprsBuild[i];
-      LogicalExpression probeExpr = keyExprsProbe[i];
-      MinorType buildType = buildExpr.getMajorType().getMinorType();
-      MinorType probeType = probeExpr.getMajorType().getMinorType();
-
-      if (buildType != probeType) {
-        // We need to add a cast to one of the expressions
-        List<MinorType> types = new LinkedList<>();
-        types.add(buildType);
-        types.add(probeType);
-        MinorType result = TypeCastRules.getLeastRestrictiveType(types);
-        ErrorCollector errorCollector = new ErrorCollectorImpl();
-
-        if (result == null) {
-          throw new DrillRuntimeException(String.format("Join conditions cannot be compared failing build " +
-                  "expression:" + " %s failing probe expression: %s", buildExpr.getMajorType().toString(),
-              probeExpr.getMajorType().toString()));
-        } else if (result != buildType) {
-          // Add a cast expression on top of the build expression
-          LogicalExpression castExpr = ExpressionTreeMaterializer.addCastExpression(buildExpr, probeExpr.getMajorType(), context.getFunctionRegistry(), errorCollector);
-          // Store the newly casted expression
-          keyExprsBuild[i] =
-              ExpressionTreeMaterializer.materialize(castExpr, incomingBuild, errorCollector,
-                  context.getFunctionRegistry());
-        } else if (result != probeType) {
-          // Add a cast expression on top of the probe expression
-          LogicalExpression castExpr = ExpressionTreeMaterializer.addCastExpression(probeExpr, buildExpr.getMajorType(), context.getFunctionRegistry(), errorCollector);
-          // store the newly casted expression
-          keyExprsProbe[i] =
-              ExpressionTreeMaterializer.materialize(castExpr, incomingProbe, errorCollector,
-                  context.getFunctionRegistry());
-        }
-      }
-    }
-  }
-
-  private void setupGetHash(ClassGenerator<HashTable> cg, MappingSet incomingMapping, LogicalExpression[] keyExprs,
+  private void setupGetHash(ClassGenerator<HashTable> cg, MappingSet incomingMapping, VectorAccessible batch, LogicalExpression[] keyExprs,
                             boolean isProbe) throws SchemaChangeException {
 
     cg.setMappingSet(incomingMapping);
@@ -351,36 +309,17 @@ public class ChainedHashTable {
       return;
     }
 
-    HoldingContainer combinedHashValue = null;
+    /*
+     * We use the same logic to generate run time code for the hash function both for hash join and hash
+     * aggregate. For join we need to hash everything as double (both for distribution and for comparison) but
+     * for aggregation we can avoid the penalty of casting to double
+     */
+    LogicalExpression hashExpression = HashPrelUtil.getHashExpression(Arrays.asList(keyExprs),
+        incomingProbe != null ? true : false);
+    final LogicalExpression materializedExpr = ExpressionTreeMaterializer.materializeAndCheckErrors(hashExpression, batch, context.getFunctionRegistry());
+    HoldingContainer hash = cg.addExpr(materializedExpr);
+    cg.getEvalBlock()._return(hash.getValue());
 
-    for (int i = 0; i < keyExprs.length; i++) {
-      LogicalExpression expr = keyExprs[i];
 
-      cg.setMappingSet(incomingMapping);
-      HoldingContainer input = cg.addExpr(expr, false);
-
-      // compute the hash(expr)
-      LogicalExpression hashfunc =
-          FunctionGenerationHelper.getFunctionExpression("hash", Types.required(MinorType.INT),
-              context.getFunctionRegistry(), input);
-      HoldingContainer hashValue = cg.addExpr(hashfunc, false);
-
-      if (i == 0) {
-        combinedHashValue = hashValue; // first expression..just use the hash value
-      } else {
-
-        // compute the combined hash value using XOR
-        LogicalExpression xorfunc =
-            FunctionGenerationHelper.getFunctionExpression("xor", Types.required(MinorType.INT),
-                context.getFunctionRegistry(), hashValue, combinedHashValue);
-        combinedHashValue = cg.addExpr(xorfunc, false);
-      }
-    }
-
-    if (combinedHashValue != null) {
-      cg.getEvalBlock()._return(combinedHashValue.getValue());
-    } else {
-      cg.getEvalBlock()._return(JExpr.lit(0));
-    }
   }
 }

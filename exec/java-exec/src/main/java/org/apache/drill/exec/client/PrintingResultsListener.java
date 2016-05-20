@@ -17,55 +17,72 @@
  */
 package org.apache.drill.exec.client;
 
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.drill.common.DrillAutoCloseables;
 import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.exec.client.QuerySubmitter.Format;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.memory.BufferAllocator;
-import org.apache.drill.exec.memory.TopLevelAllocator;
+import org.apache.drill.exec.memory.RootAllocatorFactory;
+import org.apache.drill.exec.proto.UserBitShared.QueryData;
 import org.apache.drill.exec.proto.UserBitShared.QueryId;
+import org.apache.drill.exec.proto.UserBitShared.QueryResult.QueryState;
 import org.apache.drill.exec.record.RecordBatchLoader;
-import org.apache.drill.exec.rpc.RpcException;
-import org.apache.drill.exec.rpc.user.ConnectionThrottle;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.ConnectionThrottle;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.rpc.user.UserResultsListener;
 import org.apache.drill.exec.util.VectorUtil;
 
+import com.google.common.base.Stopwatch;
+
+import io.netty.buffer.DrillBuf;
+
 public class PrintingResultsListener implements UserResultsListener {
-  AtomicInteger count = new AtomicInteger();
-  private CountDownLatch latch = new CountDownLatch(1);
-  RecordBatchLoader loader;
-  Format format;
-  int    columnWidth;
-  BufferAllocator allocator;
-  volatile Exception exception;
-  QueryId queryId;
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PrintingResultsListener.class);
+
+  private final AtomicInteger count = new AtomicInteger();
+  private final Stopwatch w = Stopwatch.createUnstarted();
+  private final RecordBatchLoader loader;
+  private final Format format;
+  private final int columnWidth;
+  private final BufferAllocator allocator;
 
   public PrintingResultsListener(DrillConfig config, Format format, int columnWidth) {
-    this.allocator = new TopLevelAllocator(config);
-    loader = new RecordBatchLoader(allocator);
+    this.allocator = RootAllocatorFactory.newRoot(config);
+    this.loader = new RecordBatchLoader(allocator);
     this.format = format;
     this.columnWidth = columnWidth;
   }
 
   @Override
-  public void submissionFailed(RpcException ex) {
-    exception = ex;
-    System.out.println("Exception (no rows returned): " + ex );
-    latch.countDown();
+  public void submissionFailed(UserException ex) {
+    System.out.println("Exception (no rows returned): " + ex + ".  Returned in " + w.elapsed(TimeUnit.MILLISECONDS)
+        + "ms.");
   }
 
   @Override
-  public void resultArrived(QueryResultBatch result, ConnectionThrottle throttle) {
-    int rows = result.getHeader().getRowCount();
-    if (result.getData() != null) {
-      count.addAndGet(rows);
+  public void queryCompleted(QueryState state) {
+    DrillAutoCloseables.closeNoChecked(allocator);
+    System.out.println("Total rows returned : " + count.get() + ".  Returned in " + w.elapsed(TimeUnit.MILLISECONDS)
+        + "ms.");
+  }
+
+  @Override
+  public void dataArrived(QueryDataBatch result, ConnectionThrottle throttle) {
+    final QueryData header = result.getHeader();
+    final DrillBuf data = result.getData();
+
+    if (data != null) {
+      count.addAndGet(header.getRowCount());
       try {
-        loader.load(result.getHeader().getDef(), result.getData());
+        loader.load(header.getDef(), data);
+        // TODO:  Clean:  DRILL-2933:  That load(...) no longer throws
+        // SchemaChangeException, so check/clean catch clause below.
       } catch (SchemaChangeException e) {
-        submissionFailed(new RpcException(e));
+        submissionFailed(UserException.systemError(e).build(logger));
       }
 
       switch(format) {
@@ -82,32 +99,11 @@ public class PrintingResultsListener implements UserResultsListener {
       loader.clear();
     }
 
-    boolean isLastChunk = result.getHeader().getIsLastChunk();
     result.release();
-
-    if (isLastChunk) {
-      allocator.close();
-      latch.countDown();
-      System.out.println("Total rows returned: " + count.get());
-    }
-
-  }
-
-  public int await() throws Exception {
-    latch.await();
-    if (exception != null) {
-      throw exception;
-    }
-    return count.get();
-  }
-
-  public QueryId getQueryId() {
-    return queryId;
   }
 
   @Override
   public void queryIdArrived(QueryId queryId) {
-    this.queryId = queryId;
+    w.start();
   }
-
 }

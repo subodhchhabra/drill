@@ -19,36 +19,37 @@ package org.apache.drill.exec.planner.physical;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
-import net.hydromatic.linq4j.Ord;
-import net.hydromatic.optiq.util.BitSets;
+import org.apache.calcite.linq4j.Ord;
+import org.apache.calcite.util.BitSets;
+import org.apache.calcite.util.ImmutableBitSet;
 import org.apache.drill.common.expression.ExpressionPosition;
 import org.apache.drill.common.expression.FieldReference;
 import org.apache.drill.common.expression.FunctionCall;
 import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.expression.ValueExpressions;
 import org.apache.drill.common.logical.data.NamedExpression;
+import org.apache.drill.exec.planner.common.DrillAggregateRelBase;
 import org.apache.drill.exec.planner.physical.visitor.PrelVisitor;
-import org.eigenbase.rel.AggregateCall;
-import org.eigenbase.rel.AggregateRelBase;
-import org.eigenbase.rel.Aggregation;
-import org.eigenbase.rel.InvalidRelException;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.sql.SqlAggFunction;
-import org.eigenbase.sql.SqlFunctionCategory;
-import org.eigenbase.sql.SqlKind;
-import org.eigenbase.sql.type.OperandTypes;
-import org.eigenbase.sql.type.ReturnTypes;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.InvalidRelException;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.sql.SqlAggFunction;
+import org.apache.calcite.sql.SqlFunctionCategory;
+import org.apache.calcite.sql.SqlKind;
+import org.apache.calcite.sql.type.OperandTypes;
+import org.apache.calcite.sql.type.ReturnTypes;
 
 import java.util.BitSet;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
-public abstract class AggPrelBase extends AggregateRelBase implements Prel {
+public abstract class AggPrelBase extends DrillAggregateRelBase implements Prel {
 
   protected static enum OperatorPhase {PHASE_1of1, PHASE_1of2, PHASE_2of2};
 
@@ -92,9 +93,15 @@ public abstract class AggPrelBase extends AggregateRelBase implements Prel {
 
   }
 
-  public AggPrelBase(RelOptCluster cluster, RelTraitSet traits, RelNode child, BitSet groupSet,
-      List<AggregateCall> aggCalls, OperatorPhase phase) throws InvalidRelException {
-    super(cluster, traits, child, groupSet, aggCalls);
+  public AggPrelBase(RelOptCluster cluster,
+                     RelTraitSet traits,
+                     RelNode child,
+                     boolean indicator,
+                     ImmutableBitSet groupSet,
+                     List<ImmutableBitSet> groupSets,
+                     List<AggregateCall> aggCalls,
+                     OperatorPhase phase) throws InvalidRelException {
+    super(cluster, traits, child, indicator, groupSet, groupSets, aggCalls);
     this.operPhase = phase;
     createKeysAndExprs();
   }
@@ -116,17 +123,17 @@ public abstract class AggPrelBase extends AggregateRelBase implements Prel {
   }
 
   protected void createKeysAndExprs() {
-    final List<String> childFields = getChild().getRowType().getFieldNames();
+    final List<String> childFields = getInput().getRowType().getFieldNames();
     final List<String> fields = getRowType().getFieldNames();
 
     for (int group : BitSets.toIter(groupSet)) {
-      FieldReference fr = new FieldReference(childFields.get(group), ExpressionPosition.UNKNOWN);
+      FieldReference fr = FieldReference.getWithQuotedRef(childFields.get(group));
       keys.add(new NamedExpression(fr, fr));
     }
 
     for (Ord<AggregateCall> aggCall : Ord.zip(aggCalls)) {
       int aggExprOrdinal = groupSet.cardinality() + aggCall.i;
-      FieldReference ref = new FieldReference(fields.get(aggExprOrdinal));
+      FieldReference ref = FieldReference.getWithQuotedRef(fields.get(aggExprOrdinal));
       LogicalExpression expr = toDrill(aggCall.e, childFields);
       NamedExpression ne = new NamedExpression(expr, ref);
       aggExprs.add(ne);
@@ -134,7 +141,7 @@ public abstract class AggPrelBase extends AggregateRelBase implements Prel {
       if (getOperatorPhase() == OperatorPhase.PHASE_1of2) {
         if (aggCall.e.getAggregation().getName().equals("COUNT")) {
           // If we are doing a COUNT aggregate in Phase1of2, then in Phase2of2 we should SUM the COUNTs,
-          Aggregation sumAggFun = new SqlSumCountAggFunction(aggCall.e.getType());
+          SqlAggFunction sumAggFun = new SqlSumCountAggFunction(aggCall.e.getType());
           AggregateCall newAggCall =
               new AggregateCall(
                   sumAggFun,
@@ -162,7 +169,7 @@ public abstract class AggPrelBase extends AggregateRelBase implements Prel {
   protected LogicalExpression toDrill(AggregateCall call, List<String> fn) {
     List<LogicalExpression> args = Lists.newArrayList();
     for (Integer i : call.getArgList()) {
-      args.add(new FieldReference(fn.get(i)));
+      args.add(FieldReference.getWithQuotedRef(fn.get(i)));
     }
 
     // for count(1).
@@ -175,7 +182,7 @@ public abstract class AggPrelBase extends AggregateRelBase implements Prel {
 
   @Override
   public Iterator<Prel> iterator() {
-    return PrelUtil.iter(getChild());
+    return PrelUtil.iter(getInput());
   }
 
   @Override

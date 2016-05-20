@@ -18,7 +18,7 @@
 package org.apache.drill.exec.rpc.control;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
+import io.netty.channel.socket.SocketChannel;
 
 import java.util.UUID;
 
@@ -29,7 +29,6 @@ import org.apache.drill.exec.rpc.RemoteConnection;
 import org.apache.drill.exec.rpc.RpcBus;
 import org.apache.drill.exec.rpc.RpcOutcomeListener;
 
-import com.google.common.io.Closeables;
 import com.google.protobuf.MessageLite;
 
 public class ControlConnection extends RemoteConnection {
@@ -41,8 +40,9 @@ public class ControlConnection extends RemoteConnection {
   private volatile boolean active = false;
   private final UUID id;
 
-  public ControlConnection(Channel channel, RpcBus<RpcType, ControlConnection> bus, BufferAllocator allocator) {
-    super(channel);
+  public ControlConnection(String name, SocketChannel channel, RpcBus<RpcType, ControlConnection> bus,
+      BufferAllocator allocator) {
+    super(channel, name);
     this.bus = bus;
     this.id = UUID.randomUUID();
     this.allocator = allocator;
@@ -105,12 +105,6 @@ public class ControlConnection extends RemoteConnection {
       return false;
     }
     return true;
-  }
-
-  public void shutdownIfClient() {
-    if (bus.isClient()) {
-      Closeables.closeQuietly(bus);
-    }
   }
 
   @Override

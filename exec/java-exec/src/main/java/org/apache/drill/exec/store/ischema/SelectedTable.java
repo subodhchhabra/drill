@@ -17,18 +17,25 @@
  */
 package org.apache.drill.exec.store.ischema;
 
-import net.hydromatic.optiq.SchemaPlus;
+import org.apache.calcite.schema.SchemaPlus;
 
+import org.apache.drill.exec.server.options.OptionManager;
 import org.apache.drill.exec.store.RecordReader;
 import org.apache.drill.exec.store.ischema.InfoSchemaTable.Catalogs;
 import org.apache.drill.exec.store.ischema.InfoSchemaTable.Columns;
 import org.apache.drill.exec.store.ischema.InfoSchemaTable.Schemata;
 import org.apache.drill.exec.store.ischema.InfoSchemaTable.Tables;
 import org.apache.drill.exec.store.ischema.InfoSchemaTable.Views;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
 
+/**
+ * The set of tables/views in INFORMATION_SCHEMA.
+ */
 public enum SelectedTable{
+  // TODO:  Resolve how to not have two different place defining table names:
+  // NOTE: These identifiers have to match the string values in
+  // InfoSchemaConstants.
   CATALOGS(new Catalogs()),
   SCHEMATA(new Schemata()),
   VIEWS(new Views()),
@@ -37,12 +44,16 @@ public enum SelectedTable{
 
   private final InfoSchemaTable tableDef;
 
+  /**
+   * ...
+   * @param  tableDef  the definition (columns and data generator) of the table
+   */
   private SelectedTable(InfoSchemaTable tableDef) {
     this.tableDef = tableDef;
   }
 
-  public RecordReader getRecordReader(SchemaPlus rootSchema, InfoSchemaFilter filter) {
-    RecordGenerator recordGenerator = tableDef.getRecordGenerator();
+  public RecordReader getRecordReader(SchemaPlus rootSchema, InfoSchemaFilter filter, OptionManager optionManager) {
+    RecordGenerator recordGenerator = tableDef.getRecordGenerator(optionManager);
     recordGenerator.setInfoSchemaFilter(filter);
     recordGenerator.scanSchema(rootSchema);
     return recordGenerator.getRecordReader();

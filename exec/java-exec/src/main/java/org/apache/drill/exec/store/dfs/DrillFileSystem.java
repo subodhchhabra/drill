@@ -19,14 +19,13 @@ package org.apache.drill.exec.store.dfs;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import org.apache.drill.exec.ops.OperatorStats;
 import org.apache.drill.exec.util.AssertionUtil;
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
@@ -50,13 +49,21 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
+import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.Progressable;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 
 /**
  * DrillFileSystem is the wrapper around the actual FileSystem implementation.
@@ -67,40 +74,23 @@ import org.apache.hadoop.util.Progressable;
 public class DrillFileSystem extends FileSystem implements OpenFileTracker {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DrillFileSystem.class);
   private final static boolean TRACKING_ENABLED = AssertionUtil.isAssertionsEnabled();
-  private final static ConcurrentMap<DrillFSDataInputStream, DebugStackTrace> openedFiles = Maps.newConcurrentMap();
 
-  static {
-    if (TRACKING_ENABLED) {
-      Runtime.getRuntime().addShutdownHook(new Thread() {
-        public void run() {
-          if (openedFiles.size() != 0) {
-            final StringBuffer errMsgBuilder = new StringBuffer();
+  public static final String HIDDEN_FILE_PREFIX = "_";
+  public static final String DOT_FILE_PREFIX = ".";
 
-            errMsgBuilder.append(String.format("Not all files opened using this FileSystem are closed. " + "There are" +
-                " still [%d] files open.\n", openedFiles.size()));
-
-            for(DebugStackTrace stackTrace : openedFiles.values()) {
-              stackTrace.addToStringBuilder(errMsgBuilder);
-            }
-
-            final String errMsg = errMsgBuilder.toString();
-            logger.error(errMsg);
-            throw new IllegalStateException(errMsg);
-          }
-        }
-      });
-    }
-  }
+  private final ConcurrentMap<DrillFSDataInputStream, DebugStackTrace> openedFiles = Maps.newConcurrentMap();
 
   private final FileSystem underlyingFs;
   private final OperatorStats operatorStats;
+  private final CompressionCodecFactory codecFactory;
 
   public DrillFileSystem(Configuration fsConf) throws IOException {
-    this(FileSystem.get(fsConf), null);
+    this(fsConf, null);
   }
 
-  public DrillFileSystem(FileSystem fs, OperatorStats operatorStats) {
-    this.underlyingFs = fs;
+  public DrillFileSystem(Configuration fsConf, OperatorStats operatorStats) throws IOException {
+    this.underlyingFs = FileSystem.get(fsConf);
+    this.codecFactory = new CompressionCodecFactory(fsConf);
     this.operatorStats = operatorStats;
   }
 
@@ -414,7 +404,22 @@ public class DrillFileSystem extends FileSystem implements OpenFileTracker {
 
   @Override
   public void close() throws IOException {
-    underlyingFs.close();
+    if (TRACKING_ENABLED) {
+      if (openedFiles.size() != 0) {
+        final StringBuffer errMsgBuilder = new StringBuffer();
+
+        errMsgBuilder.append(String.format("Not all files opened using this FileSystem are closed. " + "There are" +
+            " still [%d] files open.\n", openedFiles.size()));
+
+        for (DebugStackTrace stackTrace : openedFiles.values()) {
+          stackTrace.addToStringBuilder(errMsgBuilder);
+        }
+
+        final String errMsg = errMsgBuilder.toString();
+        logger.error(errMsg);
+        throw new IllegalStateException(errMsg);
+      }
+    }
   }
 
   @Override
@@ -687,6 +692,61 @@ public class DrillFileSystem extends FileSystem implements OpenFileTracker {
     return underlyingFs.resolvePath(p);
   }
 
+  @Override
+  public boolean truncate(final Path f, final long newLength) throws IOException {
+    return underlyingFs.truncate(f, newLength);
+  }
+
+  @Override
+  public RemoteIterator<FileStatus> listStatusIterator(final Path p) throws FileNotFoundException, IOException {
+    return underlyingFs.listStatusIterator(p);
+  }
+
+  @Override
+  public void access(final Path path, final FsAction mode) throws AccessControlException, FileNotFoundException, IOException {
+    underlyingFs.access(path, mode);
+  }
+
+  @Override
+  public FileChecksum getFileChecksum(final Path f, final long length) throws IOException {
+    return underlyingFs.getFileChecksum(f, length);
+  }
+
+  @Override
+  public void setXAttr(final Path path, final String name, final byte[] value) throws IOException {
+    underlyingFs.setXAttr(path, name, value);
+  }
+
+  @Override
+  public void setXAttr(final Path path, final String name, final byte[] value, final EnumSet<XAttrSetFlag> flag) throws IOException {
+    underlyingFs.setXAttr(path, name, value, flag);
+  }
+
+  @Override
+  public byte[] getXAttr(final Path path, final String name) throws IOException {
+    return underlyingFs.getXAttr(path, name);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(final Path path) throws IOException {
+    return underlyingFs.getXAttrs(path);
+  }
+
+  @Override
+  public Map<String, byte[]> getXAttrs(final Path path, final List<String> names) throws IOException {
+    return underlyingFs.getXAttrs(path, names);
+  }
+
+  @Override
+  public List<String> listXAttrs(final Path path) throws IOException {
+    return underlyingFs.listXAttrs(path);
+  }
+
+  @Override
+  public void removeXAttr(final Path path, final String name) throws IOException {
+    underlyingFs.removeXAttr(path, name);
+  }
+
   public List<FileStatus> list(boolean recursive, Path... paths) throws IOException {
     if (recursive) {
       List<FileStatus> statuses = Lists.newArrayList();
@@ -717,6 +777,14 @@ public class DrillFileSystem extends FileSystem implements OpenFileTracker {
     }
   }
 
+  public InputStream openPossiblyCompressedStream(Path path) throws IOException {
+    CompressionCodec codec = codecFactory.getCodec(path); // infers from file ext.
+    if (codec != null) {
+      return codec.createInputStream(open(path));
+    } else {
+      return open(path);
+    }
+  }
   @Override
   public void fileOpened(Path path, DrillFSDataInputStream fsDataInputStream) {
     openedFiles.put(fsDataInputStream, new DebugStackTrace(path, Thread.currentThread().getStackTrace()));

@@ -25,6 +25,7 @@ import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.cache.VectorAccessibleSerializable;
 import org.apache.drill.exec.exception.SchemaChangeException;
+import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.physical.config.Trace;
 import org.apache.drill.exec.record.AbstractSingleRecordBatch;
@@ -57,6 +58,8 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
 
   private SelectionVector2 sv = null;
 
+  private final BufferAllocator localAllocator;
+
   /* Tag associated with each trace operator */
   final String traceTag;
 
@@ -70,7 +73,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
     super(pop, context, incoming);
     this.traceTag = pop.traceTag;
     logLocation = context.getConfig().getString(ExecConstants.TRACE_DUMP_DIRECTORY);
-
+    localAllocator = context.getNewChildAllocator("trace", 200, 0, Long.MAX_VALUE);
     String fileName = getFileName();
 
     /* Create the log file we will dump to and initialize the file descriptors */
@@ -108,8 +111,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
     } else {
       sv = null;
     }
-    WritableBatch batch = WritableBatch.getBatchNoHVWrap(incoming.getRecordCount(), incoming, incomingHasSv2 ? true
-        : false);
+    WritableBatch batch = WritableBatch.getBatchNoHVWrap(incoming.getRecordCount(), incoming, incomingHasSv2);
     VectorAccessibleSerializable wrap = new VectorAccessibleSerializable(batch, sv, oContext.getAllocator());
 
     try {
@@ -117,7 +119,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
-    batch.reconstructContainer(container);
+    batch.reconstructContainer(localAllocator, container);
     if (incomingHasSv2) {
       sv = wrap.getSv2();
     }
@@ -138,7 +140,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
 
     /* Add all the value vectors in the container */
     for (VectorWrapper<?> vv : incoming) {
-      TransferPair tp = vv.getValueVector().getTransferPair();
+      TransferPair tp = vv.getValueVector().getTransferPair(oContext.getAllocator());
       container.add(tp.getTo());
     }
     container.buildSchema(incoming.getSchema().getSelectionVectorMode());
@@ -155,7 +157,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     /* Release the selection vector */
     if (sv != null) {
       sv.clear();
@@ -167,8 +169,7 @@ public class TraceRecordBatch extends AbstractSingleRecordBatch<Trace> {
     } catch (IOException e) {
       logger.error("Unable to close file descriptors for file: " + getFileName());
     }
-    super.cleanup();
-    incoming.cleanup();
+    super.close();
   }
 
 }

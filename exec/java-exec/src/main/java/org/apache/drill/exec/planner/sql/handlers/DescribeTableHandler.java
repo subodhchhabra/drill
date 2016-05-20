@@ -19,32 +19,36 @@
 package org.apache.drill.exec.planner.sql.handlers;
 
 import static org.apache.drill.exec.planner.sql.parser.DrillParserUtil.CHARSET;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.COLS_COL_COLUMN_NAME;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.COLS_COL_DATA_TYPE;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.COLS_COL_IS_NULLABLE;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.IS_SCHEMA_NAME;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.SHRD_COL_TABLE_NAME;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.SHRD_COL_TABLE_SCHEMA;
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.TAB_COLUMNS;
 
 import java.util.List;
 
-import net.hydromatic.optiq.SchemaPlus;
-import net.hydromatic.optiq.tools.Planner;
-import net.hydromatic.optiq.tools.RelConversionException;
-
-import org.apache.drill.exec.ops.QueryContext;
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlNodeList;
+import org.apache.calcite.sql.SqlSelect;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
+import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.tools.RelConversionException;
+import org.apache.calcite.util.Util;
+import org.apache.drill.common.exceptions.UserException;
+import org.apache.drill.exec.planner.sql.SchemaUtilites;
 import org.apache.drill.exec.planner.sql.parser.DrillParserUtil;
 import org.apache.drill.exec.planner.sql.parser.SqlDescribeTable;
-import org.apache.drill.exec.store.AbstractSchema;
-import org.apache.drill.exec.store.ischema.InfoSchemaConstants;
 import org.apache.drill.exec.work.foreman.ForemanSetupException;
-import org.eigenbase.relopt.hep.HepPlanner;
-import org.eigenbase.sql.SqlIdentifier;
-import org.eigenbase.sql.SqlLiteral;
-import org.eigenbase.sql.SqlNode;
-import org.eigenbase.sql.SqlNodeList;
-import org.eigenbase.sql.SqlSelect;
-import org.eigenbase.sql.fun.SqlStdOperatorTable;
-import org.eigenbase.sql.parser.SqlParserPos;
-import org.eigenbase.util.Util;
 
 import com.google.common.collect.ImmutableList;
 
-public class DescribeTableHandler extends DefaultSqlHandler implements InfoSchemaConstants {
+public class DescribeTableHandler extends DefaultSqlHandler {
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DescribeTableHandler.class);
 
   public DescribeTableHandler(SqlHandlerConfig config) { super(config); }
 
@@ -54,35 +58,52 @@ public class DescribeTableHandler extends DefaultSqlHandler implements InfoSchem
     SqlDescribeTable node = unwrap(sqlNode, SqlDescribeTable.class);
 
     try {
-      List<SqlNode> selectList = ImmutableList.of((SqlNode) new SqlIdentifier(COL_COLUMN_NAME, SqlParserPos.ZERO),
-          new SqlIdentifier(COL_DATA_TYPE, SqlParserPos.ZERO),
-          new SqlIdentifier(COL_IS_NULLABLE, SqlParserPos.ZERO));
+      List<SqlNode> selectList =
+          ImmutableList.of((SqlNode) new SqlIdentifier(COLS_COL_COLUMN_NAME, SqlParserPos.ZERO),
+                                     new SqlIdentifier(COLS_COL_DATA_TYPE, SqlParserPos.ZERO),
+                                     new SqlIdentifier(COLS_COL_IS_NULLABLE, SqlParserPos.ZERO));
 
       SqlNode fromClause = new SqlIdentifier(
           ImmutableList.of(IS_SCHEMA_NAME, TAB_COLUMNS), null, SqlParserPos.ZERO, null);
 
       final SqlIdentifier table = node.getTable();
-      final SchemaPlus schema = findSchema(context.getRootSchema(), context.getNewDefaultSchema(),
-          Util.skipLast(table.names));
+      final SchemaPlus defaultSchema = config.getConverter().getDefaultSchema();
+      final List<String> schemaPathGivenInCmd = Util.skipLast(table.names);
+      final SchemaPlus schema = SchemaUtilites.findSchema(defaultSchema, schemaPathGivenInCmd);
+
+      if (schema == null) {
+        SchemaUtilites.throwSchemaNotFoundException(defaultSchema,
+            SchemaUtilites.SCHEMA_PATH_JOINER.join(schemaPathGivenInCmd));
+      }
+
+      if (SchemaUtilites.isRootSchema(schema)) {
+        throw UserException.validationError()
+            .message("No schema selected.")
+            .build(logger);
+      }
+
       final String tableName = Util.last(table.names);
 
+      // find resolved schema path
+      final String schemaPath = SchemaUtilites.unwrapAsDrillSchemaInstance(schema).getFullSchemaName();
+
       if (schema.getTable(tableName) == null) {
-        throw new RelConversionException(String.format("Table %s is not valid", Util.sepList(table.names, ".")));
+        throw UserException.validationError()
+            .message("Unknown table [%s] in schema [%s]", tableName, schemaPath)
+            .build(logger);
       }
 
       SqlNode schemaCondition = null;
-      if (!isRootSchema(schema)) {
-        AbstractSchema drillSchema = getDrillSchema(schema);
-
+      if (!SchemaUtilites.isRootSchema(schema)) {
         schemaCondition = DrillParserUtil.createCondition(
-            new SqlIdentifier(COL_TABLE_SCHEMA, SqlParserPos.ZERO),
+            new SqlIdentifier(SHRD_COL_TABLE_SCHEMA, SqlParserPos.ZERO),
             SqlStdOperatorTable.EQUALS,
-            SqlLiteral.createCharString(drillSchema.getFullSchemaName(), CHARSET, SqlParserPos.ZERO)
+            SqlLiteral.createCharString(schemaPath, CHARSET, SqlParserPos.ZERO)
         );
       }
 
       SqlNode where = DrillParserUtil.createCondition(
-          new SqlIdentifier(COL_TABLE_NAME, SqlParserPos.ZERO),
+          new SqlIdentifier(SHRD_COL_TABLE_NAME, SqlParserPos.ZERO),
           SqlStdOperatorTable.EQUALS,
           SqlLiteral.createCharString(tableName, CHARSET, SqlParserPos.ZERO));
 
@@ -90,12 +111,16 @@ public class DescribeTableHandler extends DefaultSqlHandler implements InfoSchem
 
       SqlNode columnFilter = null;
       if (node.getColumn() != null) {
-        columnFilter = DrillParserUtil.createCondition(new SqlIdentifier(COL_COLUMN_NAME, SqlParserPos.ZERO),
-            SqlStdOperatorTable.EQUALS,
-            SqlLiteral.createCharString(node.getColumn().toString(), CHARSET, SqlParserPos.ZERO));
+        columnFilter =
+            DrillParserUtil.createCondition(
+                new SqlIdentifier(COLS_COL_COLUMN_NAME, SqlParserPos.ZERO),
+                SqlStdOperatorTable.EQUALS,
+                SqlLiteral.createCharString(node.getColumn().toString(), CHARSET, SqlParserPos.ZERO));
       } else if (node.getColumnQualifier() != null) {
-        columnFilter = DrillParserUtil.createCondition(new SqlIdentifier(COL_COLUMN_NAME, SqlParserPos.ZERO),
-            SqlStdOperatorTable.LIKE, node.getColumnQualifier());
+        columnFilter =
+            DrillParserUtil.createCondition(
+                new SqlIdentifier(COLS_COL_COLUMN_NAME, SqlParserPos.ZERO),
+                SqlStdOperatorTable.LIKE, node.getColumnQualifier());
       }
 
       where = DrillParserUtil.createCondition(where, SqlStdOperatorTable.AND, columnFilter);
@@ -103,7 +128,9 @@ public class DescribeTableHandler extends DefaultSqlHandler implements InfoSchem
       return new SqlSelect(SqlParserPos.ZERO, null, new SqlNodeList(selectList, SqlParserPos.ZERO),
           fromClause, where, null, null, null, null, null, null);
     } catch (Exception ex) {
-      throw new RelConversionException("Error while rewriting DESCRIBE query: " + ex.getMessage(), ex);
+      throw UserException.planError(ex)
+          .message("Error while rewriting DESCRIBE query: %d", ex.getMessage())
+          .build(logger);
     }
   }
 }

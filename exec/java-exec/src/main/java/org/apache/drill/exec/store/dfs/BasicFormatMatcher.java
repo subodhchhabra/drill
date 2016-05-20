@@ -23,6 +23,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 
+import org.apache.drill.exec.planner.logical.DrillTable;
+import org.apache.drill.exec.planner.logical.DynamicDrillTable;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.io.compress.CompressionCodec;
@@ -36,34 +39,32 @@ import com.google.common.collect.Range;
 public class BasicFormatMatcher extends FormatMatcher{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(BasicFormatMatcher.class);
 
-  private final List<Pattern> patterns;
-  private final MagicStringMatcher matcher;
-  protected final DrillFileSystem fs;
   protected final FormatPlugin plugin;
   protected final boolean compressible;
   protected final CompressionCodecFactory codecFactory;
 
-  public BasicFormatMatcher(FormatPlugin plugin, DrillFileSystem fs, List<Pattern> patterns, List<MagicString> magicStrings) {
+  private final List<Pattern> patterns;
+  private final MagicStringMatcher matcher;
+
+  public BasicFormatMatcher(FormatPlugin plugin, List<Pattern> patterns, List<MagicString> magicStrings) {
     super();
     this.patterns = ImmutableList.copyOf(patterns);
     this.matcher = new MagicStringMatcher(magicStrings);
-    this.fs = fs;
     this.plugin = plugin;
     this.compressible = false;
     this.codecFactory = null;
   }
 
-  public BasicFormatMatcher(FormatPlugin plugin, DrillFileSystem fs, List<String> extensions, boolean compressible) {
+  public BasicFormatMatcher(FormatPlugin plugin, Configuration fsConf, List<String> extensions, boolean compressible) {
     List<Pattern> patterns = Lists.newArrayList();
     for (String extension : extensions) {
       patterns.add(Pattern.compile(".*\\." + extension));
     }
     this.patterns = patterns;
     this.matcher = new MagicStringMatcher(new ArrayList<MagicString>());
-    this.fs = fs;
     this.plugin = plugin;
     this.compressible = compressible;
-    this.codecFactory = new CompressionCodecFactory(fs.getConf());
+    this.codecFactory = new CompressionCodecFactory(fsConf);
   }
 
   @Override
@@ -72,43 +73,51 @@ public class BasicFormatMatcher extends FormatMatcher{
   }
 
   @Override
-  public FormatSelection isReadable(FileSelection selection) throws IOException {
-    if (isReadable(selection.getFirstPath(fs))) {
+  public DrillTable isReadable(DrillFileSystem fs,
+      FileSelection selection, FileSystemPlugin fsPlugin,
+      String storageEngineName, String userName) throws IOException {
+    if (isFileReadable(fs, selection.getFirstPath(fs))) {
       if (plugin.getName() != null) {
         NamedFormatPluginConfig namedConfig = new NamedFormatPluginConfig();
         namedConfig.name = plugin.getName();
-        return new FormatSelection(namedConfig, selection);
+        return new DynamicDrillTable(fsPlugin, storageEngineName, userName, new FormatSelection(namedConfig, selection));
       } else {
-        return new FormatSelection(plugin.getConfig(), selection);
+        return new DynamicDrillTable(fsPlugin, storageEngineName, userName, new FormatSelection(plugin.getConfig(), selection));
       }
     }
     return null;
   }
 
-  protected final boolean isReadable(FileStatus status) throws IOException {
-    CompressionCodec codec = null;
+  /*
+   * Function returns true if the file extension matches the pattern
+   */
+  @Override
+  public boolean isFileReadable(DrillFileSystem fs, FileStatus status) throws IOException {
+  CompressionCodec codec = null;
     if (compressible) {
       codec = codecFactory.getCodec(status.getPath());
     }
-    String fileName;
+    String fileName = status.getPath().toString();
+    String fileNameHacked = null;
     if (codec != null) {
-      String path = status.getPath().toString();
-      fileName = path.substring(0, path.lastIndexOf('.'));
-    } else {
-      fileName = status.getPath().toString();
+        fileNameHacked = fileName.substring(0, fileName.lastIndexOf('.'));
     }
+
+    // Check for a matching pattern for compressed and uncompressed file name
     for (Pattern p : patterns) {
       if (p.matcher(fileName).matches()) {
         return true;
       }
+      if (fileNameHacked != null  &&  p.matcher(fileNameHacked).matches()) {
+        return true;
+      }
     }
 
-    if (matcher.matches(status)) {
+    if (matcher.matches(fs, status)) {
       return true;
     }
     return false;
   }
-
 
   @Override
   @JsonIgnore
@@ -128,10 +137,20 @@ public class BasicFormatMatcher extends FormatMatcher{
       }
     }
 
-    public boolean matches(FileStatus status) throws IOException{
-      if (ranges.isEmpty()) {
+    public boolean matches(DrillFileSystem fs, FileStatus status) throws IOException{
+      if (ranges.isEmpty() || status.isDirectory()) {
         return false;
       }
+      // walk all the way down in the symlinks until a hard entry is reached
+      FileStatus current = status;
+      while (current.isSymlink()) {
+        current = fs.getFileStatus(status.getSymlink());
+      }
+      // if hard entry is not a file nor can it be a symlink then it is not readable simply deny matching.
+      if (!current.isFile()) {
+        return false;
+      }
+
       final Range<Long> fileRange = Range.closedOpen( 0L, status.getLen());
 
       try (FSDataInputStream is = fs.open(status.getPath())) {

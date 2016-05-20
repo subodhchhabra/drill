@@ -20,79 +20,146 @@ package org.apache.drill.exec.store.dfs;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Map;
 
-import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.logical.FormatPluginConfig;
 import org.apache.drill.common.logical.StoragePluginConfig;
+import org.apache.drill.common.scanner.persistence.ScanResult;
 import org.apache.drill.common.util.ConstructorChecker;
-import org.apache.drill.common.util.PathScanner;
-import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.server.DrillbitContext;
+import org.apache.hadoop.conf.Configuration;
 
 import com.google.common.collect.Maps;
 
+/**
+ * Responsible for instantiating format plugins
+ */
 public class FormatCreator {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FormatCreator.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FormatCreator.class);
 
-  static final ConstructorChecker FORMAT_BASED = new ConstructorChecker(String.class, DrillbitContext.class, DrillFileSystem.class, StoragePluginConfig.class, FormatPluginConfig.class);
-  static final ConstructorChecker DEFAULT_BASED = new ConstructorChecker(String.class, DrillbitContext.class, DrillFileSystem.class, StoragePluginConfig.class);
+  private static final ConstructorChecker FORMAT_BASED = new ConstructorChecker(String.class, DrillbitContext.class,
+      Configuration.class, StoragePluginConfig.class, FormatPluginConfig.class);
+  private static final ConstructorChecker DEFAULT_BASED = new ConstructorChecker(String.class, DrillbitContext.class,
+      Configuration.class, StoragePluginConfig.class);
 
-  static Map<String, FormatPlugin> getFormatPlugins(DrillbitContext context, DrillFileSystem fileSystem, FileSystemConfig storageConfig) {
-    final DrillConfig config = context.getConfig();
+  /**
+   * Returns a Map from the FormatPlugin Config class to the constructor of the format plugin that accepts it.
+   * This is used to create a format plugin instance from its configuration.
+   * @param pluginClasses the FormatPlugin classes to index on their config class
+   * @return a map of type to constructor that taks the config
+   */
+  private static Map<Class<?>, Constructor<?>> initConfigConstructors(Collection<Class<? extends FormatPlugin>> pluginClasses) {
+    Map<Class<?>, Constructor<?>> constructors = Maps.newHashMap();
+    for (Class<? extends FormatPlugin> pluginClass: pluginClasses) {
+      for (Constructor<?> c : pluginClass.getConstructors()) {
+        try {
+          if (!FORMAT_BASED.check(c)) {
+            continue;
+          }
+          Class<?> configClass = c.getParameterTypes()[4];
+          constructors.put(configClass, c);
+        } catch (Exception e) {
+          logger.warn(String.format("Failure while trying instantiate FormatPlugin %s.", pluginClass.getName()), e);
+        }
+      }
+    }
+    return constructors;
+  }
+
+
+  private final DrillbitContext context;
+  private final Configuration fsConf;
+  private final FileSystemConfig storageConfig;
+
+  /** format plugins initialized from the drill config, indexed by name */
+  private final Map<String, FormatPlugin> configuredPlugins;
+  /** The format plugin classes retrieved from classpath scanning */
+  private final Collection<Class<? extends FormatPlugin>> pluginClasses;
+  /** a Map from the FormatPlugin Config class to the constructor of the format plugin that accepts it.*/
+  private final Map<Class<?>, Constructor<?>> configConstructors;
+
+  FormatCreator(
+      DrillbitContext context,
+      Configuration fsConf,
+      FileSystemConfig storageConfig,
+      ScanResult classpathScan) {
+    this.context = context;
+    this.fsConf = fsConf;
+    this.storageConfig = storageConfig;
+    this.pluginClasses = classpathScan.getImplementations(FormatPlugin.class);
+    this.configConstructors = initConfigConstructors(pluginClasses);
+
     Map<String, FormatPlugin> plugins = Maps.newHashMap();
-
-    Collection<Class<? extends FormatPlugin>> pluginClasses = PathScanner.scanForImplementations(FormatPlugin.class, config.getStringList(ExecConstants.STORAGE_ENGINE_SCAN_PACKAGES));
-
-
     if (storageConfig.formats == null || storageConfig.formats.isEmpty()) {
-
       for (Class<? extends FormatPlugin> pluginClass: pluginClasses) {
         for (Constructor<?> c : pluginClass.getConstructors()) {
           try {
             if (!DEFAULT_BASED.check(c)) {
               continue;
             }
-            FormatPlugin plugin = (FormatPlugin) c.newInstance(null, context, fileSystem, storageConfig);
+            FormatPlugin plugin = (FormatPlugin) c.newInstance(null, context, fsConf, storageConfig);
             plugins.put(plugin.getName(), plugin);
           } catch (Exception e) {
             logger.warn(String.format("Failure while trying instantiate FormatPlugin %s.", pluginClass.getName()), e);
           }
         }
       }
-
     } else {
-      Map<Class<?>, Constructor<?>> constructors = Maps.newHashMap();
-      for (Class<? extends FormatPlugin> pluginClass: pluginClasses) {
-        for (Constructor<?> c : pluginClass.getConstructors()) {
-          try {
-            if (!FORMAT_BASED.check(c)) {
-              continue;
-            }
-            Class<? extends FormatPluginConfig> configClass = (Class<? extends FormatPluginConfig>) c.getParameterTypes()[4];
-            constructors.put(configClass, c);
-          } catch (Exception e) {
-            logger.warn(String.format("Failure while trying instantiate FormatPlugin %s.", pluginClass.getName()), e);
-          }
-        }
-      }
-
       for (Map.Entry<String, FormatPluginConfig> e : storageConfig.formats.entrySet()) {
-        Constructor<?> c = constructors.get(e.getValue().getClass());
+        Constructor<?> c = configConstructors.get(e.getValue().getClass());
         if (c == null) {
           logger.warn("Unable to find constructor for storage config named '{}' of type '{}'.", e.getKey(), e.getValue().getClass().getName());
           continue;
         }
         try {
-          plugins.put(e.getKey(), (FormatPlugin) c.newInstance(e.getKey(), context, fileSystem, storageConfig, e.getValue()));
+          plugins.put(e.getKey(), (FormatPlugin) c.newInstance(e.getKey(), context, fsConf, storageConfig, e.getValue()));
         } catch (InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException e1) {
           logger.warn("Failure initializing storage config named '{}' of type '{}'.", e.getKey(), e.getValue().getClass().getName(), e1);
         }
       }
-
     }
-
-    return plugins;
+    this.configuredPlugins = Collections.unmodifiableMap(plugins);
   }
 
+  /**
+   * @param name the name of the formatplugin instance in the drill config
+   * @return The configured FormatPlugin for this name
+   */
+  FormatPlugin getFormatPluginByName(String name) {
+    return configuredPlugins.get(name);
+  }
+
+  /**
+   * @return all the format plugins from the Drill config
+   */
+  Collection<FormatPlugin> getConfiguredFormatPlugins() {
+    return configuredPlugins.values();
+  }
+
+  /**
+   * Instantiate a new format plugin instance from the provided config object
+   * @param fpconfig the conf for the plugin
+   * @return the newly created instance of a FormatPlugin based on provided config
+   */
+  FormatPlugin newFormatPlugin(FormatPluginConfig fpconfig) {
+    Constructor<?> c = configConstructors.get(fpconfig.getClass());
+    if (c == null) {
+      throw UserException.dataReadError()
+        .message(
+            "Unable to find constructor for storage config of type %s",
+            fpconfig.getClass().getName())
+        .build(logger);
+    }
+    try {
+      return (FormatPlugin) c.newInstance(null, context, fsConf, storageConfig, fpconfig);
+    } catch (InstantiationException | IllegalAccessException | IllegalArgumentException | InvocationTargetException e) {
+      throw UserException.dataReadError(e)
+        .message(
+            "Failure initializing storage config of type %s",
+            fpconfig.getClass().getName())
+        .build(logger);
+    }
+  }
 }

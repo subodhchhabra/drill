@@ -17,10 +17,13 @@
  */
 package org.apache.drill;
 
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.types.TypeProtos;
+import org.apache.drill.common.util.FileUtils;
 import org.apache.drill.common.util.TestTools;
 import org.junit.Test;
-import org.apache.drill.exec.rpc.RpcException;
+
+import static org.junit.Assert.assertEquals;
 
 public class TestStarQueries extends BaseTestQuery{
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestStarQueries.class);
@@ -233,7 +236,7 @@ public class TestStarQueries extends BaseTestQuery{
 
   @Test // DRILL-1293
   public void testStarView1() throws Exception {
-    test("use dfs.tmp");
+    test("use dfs_test.tmp");
     test("create view vt1 as select * from cp.`tpch/region.parquet` r, cp.`tpch/nation.parquet` n where r.r_regionkey = n.n_regionkey");
     test("select * from vt1");
     test("drop view vt1");
@@ -246,7 +249,15 @@ public class TestStarQueries extends BaseTestQuery{
 
   @Test  // Join a select star of SchemaTable, with a select star of Schema-less table.
   public void testSelStarJoinSchemaWithSchemaLess() throws Exception {
-    test("select t1.name, t1.kind, t2.n_nationkey from (select * from sys.options) t1 join (select * from cp.`tpch/nation.parquet`) t2 on t1.name = t2.n_name;");
+    String query = "select t1.name, t1.kind, t2.n_nationkey from " +
+        "(select * from sys.options) t1 " +
+        "join (select * from cp.`tpch/nation.parquet`) t2 " +
+        "on t1.name = t2.n_name";
+
+    test("alter session set `planner.enable_broadcast_join` = false");
+    test(query);
+    test("alter session set `planner.enable_broadcast_join` = true");
+    test(query);
   }
 
   @Test // see DRILL-1811
@@ -255,11 +266,11 @@ public class TestStarQueries extends BaseTestQuery{
     test("select *, first_name, *, last_name from cp.`employee.json`;");
   }
 
-  @Test(expected = RpcException.class)  // Should get "At line 1, column 8: Column 'n_nationkey' is ambiguous"
+  @Test(expected = UserException.class)  // Should get "At line 1, column 8: Column 'n_nationkey' is ambiguous"
   public void testSelStarAmbiguousJoin() throws Exception {
     try {
       test("select x.n_nationkey, x.n_name, x.n_regionkey, x.r_name from (select * from cp.`tpch/nation.parquet` n, cp.`tpch/region.parquet` r where n.n_regionkey = r.r_regionkey) x " ) ;
-    } catch (RpcException e) {
+    } catch (UserException e) {
       logger.info("***** Test resulted in expected failure: " + e.getMessage());
       throw e;
     }
@@ -448,4 +459,40 @@ public class TestStarQueries extends BaseTestQuery{
             "            where n2.n_regionkey = r2.r_regionkey)")
         .build().run();
   }
+
+
+  @Test //DRILL-2802
+  public void testSelectPartitionColumnOnly() throws Exception {
+    final String table = FileUtils.getResourceAsFile("/multilevel/parquet").toURI().toString();
+    final String query1 = String.format("select dir0 from dfs_test.`%s` limit 1 ", table);
+
+    final String[] expectedPlan1 = {".*Project.*dir0=\\[\\$0\\]"};
+    final String[] excludedPlan1 = {};
+    PlanTestBase.testPlanMatchingPatterns(query1, expectedPlan1, excludedPlan1);
+
+    final String query2 = String.format("select dir0, dir1 from dfs_test.`%s` limit 1 ", table);
+
+    final String[] expectedPlan2 = {".*Project.*dir0=\\[\\$0\\], dir1=\\[\\$1\\]"};
+    final String[] excludedPlan2 = {};
+    PlanTestBase.testPlanMatchingPatterns(query2, expectedPlan2, excludedPlan2);
+
+  }
+
+  @Test   // DRILL-2053 : column name is case-insensitive when join a CTE with a regluar table.
+  public void testCaseSenJoinCTEWithRegTab() throws Exception {
+    final String query1 = "with a as ( select * from cp.`tpch/nation.parquet` ) select * from a, cp.`tpch/region.parquet` b where a.N_REGIONKEY = b.R_REGIONKEY";
+
+    int actualRecordCount = testSql(query1);
+    int expectedRecordCount = 25;
+    assertEquals(String.format("Received unexpected number of rows in output for query:\n%s\n expected=%d, received=%s",
+        query1, expectedRecordCount, actualRecordCount), expectedRecordCount, actualRecordCount);
+
+    final String query2 = "with a as ( select * from cp.`tpch/nation.parquet` ) select * from a, cp.`tpch/region.parquet` b where a.n_regionkey = b.r_regionkey";
+
+    actualRecordCount = testSql(query2);
+    expectedRecordCount = 25;
+    assertEquals(String.format("Received unexpected number of rows in output for query:\n%s\n expected=%d, received=%s",
+        query2, expectedRecordCount, actualRecordCount), expectedRecordCount, actualRecordCount);
+  }
+
 }

@@ -197,8 +197,8 @@ public class TestProjectPushDown extends PlanTestBase {
     final String pushDownSqlPattern = "select %s from cp.`%s` t0, cp.`%s` t1, cp.`%s` t2 where %s";
     final String projection = "t0.fcolumns[0], t0.fmy.field, t0.freally.nested.field[0], t1.scolumns[0], t1.smy.field, t1.sreally.nested.field[0], t2.tcolumns[0], t2.tmy.field, t2.treally.nested.field[0]";
     final String filter = "t0.fname = t1.sname and t1.slastname = t2.tlastname and t0.fcolumns[1] + t1.scolumns[1] = 100";
-    final String firstExpected = "\"columns\" : [ \"`fname`\", \"`fcolumns`[1]\", \"`fcolumns`[0]\", \"`fmy`.`field`\", \"`freally`.`nested`.`field`[0]\" ],";
-    final String secondExpected = "\"columns\" : [ \"`sname`\", \"`slastname`\", \"`scolumns`[1]\", \"`scolumns`[0]\", \"`smy`.`field`\", \"`sreally`.`nested`.`field`[0]\" ],";
+    final String firstExpected = "\"columns\" : [ \"`fname`\", \"`fcolumns`[0]\", \"`fmy`.`field`\", \"`freally`.`nested`.`field`[0]\", \"`fcolumns`[1]\" ],";
+    final String secondExpected = "\"columns\" : [ \"`sname`\", \"`slastname`\", \"`scolumns`[0]\", \"`smy`.`field`\", \"`sreally`.`nested`.`field`[0]\", \"`scolumns`[1]\" ]";
     final String thirdExpected = "\"columns\" : [ \"`tlastname`\", \"`tcolumns`[0]\", \"`tmy`.`field`\", \"`treally`.`nested`.`field`[0]\" ],";
 
     for (String table: TABLES) {
@@ -206,6 +206,61 @@ public class TestProjectPushDown extends PlanTestBase {
         new String[]{firstExpected, secondExpected, thirdExpected}, projection, table, table, table, filter));
     }
 
+  }
+
+  @Test
+  public void testEmptyColProjectInTextScan() throws Exception {
+    final String sql = "SELECT count(*) cnt from cp.`store/text/data/d1/regions.csv`";
+    final String expected = "\"columns\" : [ ]";
+    // Verify plan
+    testPushDown(new PushDownTestInstance(sql, new String[] {expected}));
+
+    // Verify execution result.
+    testBuilder()
+        .sqlQuery(sql)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues((long) 5)
+        .build()
+        .run();
+  }
+
+  @Test
+  public void testEmptyColProjectInJsonScan() throws Exception {
+    final String sql = "SELECT count(*) cnt from cp.`employee.json`";
+    final String expected = "\"columns\" : [ ]";
+
+    testPushDown(new PushDownTestInstance(sql, new String[] {expected}));
+
+    // Verify execution result.
+    testBuilder()
+        .sqlQuery(sql)
+        .unOrdered()
+        .baselineColumns("cnt")
+        .baselineValues((long) 1155)
+        .build()
+        .run();
+  }
+
+  @Test
+  public void testEmptyColProjectInParquetScan() throws Exception {
+    final String sql = "SELECT 1 + 1 as val from cp.`tpch/region.parquet`";
+    final String expected = "\"columns\" : [ ]";
+
+    testPushDown(new PushDownTestInstance(sql, new String[] {expected}));
+
+    // Verify execution result.
+    testBuilder()
+        .sqlQuery(sql)
+        .unOrdered()
+        .baselineColumns("val")
+        .baselineValues(2)
+        .baselineValues(2)
+        .baselineValues(2)
+        .baselineValues(2)
+        .baselineValues(2)
+        .build()
+        .run();
   }
 
   @Test

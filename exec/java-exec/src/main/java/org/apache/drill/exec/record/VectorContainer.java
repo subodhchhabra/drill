@@ -25,20 +25,23 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
-import com.google.common.collect.Sets;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.types.TypeProtos.MajorType;
 import org.apache.drill.exec.expr.TypeHelper;
+import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
+import org.apache.drill.exec.record.selection.SelectionVector2;
+import org.apache.drill.exec.record.selection.SelectionVector4;
 import org.apache.drill.exec.vector.SchemaChangeCallBack;
 import org.apache.drill.exec.vector.ValueVector;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccessible {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(VectorContainer.class);
+  //private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(VectorContainer.class);
 
   protected final List<VectorWrapper<?>> wrappers = Lists.newArrayList();
   private BatchSchema schema;
@@ -52,6 +55,25 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
 
   public VectorContainer( OperatorContext oContext) {
     this.oContext = oContext;
+  }
+
+  @Override
+  public String toString() {
+    return super.toString()
+        + "[recordCount = " + recordCount
+        + ", schemaChanged = " + schemaChanged
+        + ", schema = " + schema
+        + ", wrappers = " + wrappers
+        + ", ...]";
+  }
+
+  /**
+   * Get the OperatorContext.
+   *
+   * @return the OperatorContext; may be null
+   */
+  public OperatorContext getOperatorContext() {
+    return oContext;
   }
 
   public boolean isSchemaChanged() {
@@ -71,27 +93,47 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
     add(vv, releasable);
   }
 
+  /**
+   * Transfer vectors from containerIn to this.
+   */
+  void transferIn(VectorContainer containerIn) {
+    Preconditions.checkArgument(this.wrappers.size() == containerIn.wrappers.size());
+    for (int i = 0; i < this.wrappers.size(); ++i) {
+      containerIn.wrappers.get(i).transfer(this.wrappers.get(i));
+    }
+  }
+
+  /**
+   * Transfer vectors from this to containerOut
+   */
+  void transferOut(VectorContainer containerOut) {
+    Preconditions.checkArgument(this.wrappers.size() == containerOut.wrappers.size());
+    for (int i = 0; i < this.wrappers.size(); ++i) {
+      this.wrappers.get(i).transfer(containerOut.wrappers.get(i));
+    }
+  }
 
   public <T extends ValueVector> T addOrGet(MaterializedField field) {
     return addOrGet(field, null);
   }
 
-  public <T extends ValueVector> T addOrGet(MaterializedField field, SchemaChangeCallBack callBack) {
-    TypedFieldId id = getValueVectorId(field.getPath());
-    ValueVector v = null;
-    Class clazz = TypeHelper.getValueVectorClass(field.getType().getMinorType(), field.getType().getMode());
+  public <T extends ValueVector> T addOrGet(final MaterializedField field, final SchemaChangeCallBack callBack) {
+    final TypedFieldId id = getValueVectorId(SchemaPath.getSimplePath(field.getPath()));
+    final ValueVector vector;
+    final Class<?> clazz = TypeHelper.getValueVectorClass(field.getType().getMinorType(), field.getType().getMode());
     if (id != null) {
-      v = getValueAccessorById(id.getFieldIds()).getValueVector();
-      if (id.getFieldIds().length == 1 && clazz != null && !clazz.isAssignableFrom(v.getClass())) {
-        ValueVector newVector = TypeHelper.getNewVector(field, this.oContext.getAllocator(), callBack);
-        replace(v, newVector);
+      vector = getValueAccessorById(id.getFieldIds()).getValueVector();
+      if (id.getFieldIds().length == 1 && clazz != null && !clazz.isAssignableFrom(vector.getClass())) {
+        final ValueVector newVector = TypeHelper.getNewVector(field, this.oContext.getAllocator(), callBack);
+        replace(vector, newVector);
         return (T) newVector;
       }
     } else {
-      v = TypeHelper.getNewVector(field, this.oContext.getAllocator());
-      add(v);
+
+      vector = TypeHelper.getNewVector(field, this.oContext.getAllocator(), callBack);
+      add(vector);
     }
-    return (T) v;
+    return (T) vector;
   }
 
   public <T extends ValueVector> T addOrGet(String name, MajorType type, Class<T> clazz) {
@@ -109,15 +151,15 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
    *          The RecordBatch iterator the contains the batch we should take over.
    * @return A cloned vector container.
    */
-  public static VectorContainer getTransferClone(VectorAccessible incoming) {
-    VectorContainer vc = new VectorContainer();
+  public static VectorContainer getTransferClone(VectorAccessible incoming, OperatorContext oContext) {
+    VectorContainer vc = new VectorContainer(oContext);
     for (VectorWrapper<?> w : incoming) {
       vc.cloneAndTransfer(w);
     }
     return vc;
   }
 
-  public static VectorContainer getTransferClone(VectorAccessible incoming, VectorWrapper[] ignoreWrappers) {
+  public static VectorContainer getTransferClone(VectorAccessible incoming, VectorWrapper[] ignoreWrappers, OperatorContext oContext) {
     Iterable<VectorWrapper<?>> wrappers = incoming;
     if (ignoreWrappers != null) {
       final List<VectorWrapper> ignored = Lists.newArrayList(ignoreWrappers);
@@ -126,7 +168,7 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
       wrappers = resultant;
     }
 
-    final VectorContainer vc = new VectorContainer();
+    final VectorContainer vc = new VectorContainer(oContext);
     for (VectorWrapper<?> w : wrappers) {
       vc.cloneAndTransfer(w);
     }
@@ -134,25 +176,32 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
     return vc;
   }
 
+  /**
+   * Sorts vectors into canonical order (by field name) in new VectorContainer.
+   */
   public static VectorContainer canonicalize(VectorContainer original) {
     VectorContainer vc = new VectorContainer();
     List<VectorWrapper<?>> canonicalWrappers = new ArrayList<VectorWrapper<?>>(original.wrappers);
     // Sort list of VectorWrapper alphabetically based on SchemaPath.
     Collections.sort(canonicalWrappers, new Comparator<VectorWrapper<?>>() {
       public int compare(VectorWrapper<?> v1, VectorWrapper<?> v2) {
-        return v1.getField().getPath().toExpr().compareTo(v2.getField().getPath().toExpr());
+        return v1.getField().getPath().compareTo(v2.getField().getPath());
       }
     });
 
     for (VectorWrapper<?> w : canonicalWrappers) {
-      vc.add(w.getValueVector());
+      if (w.isHyper()) {
+        vc.add(w.getValueVectors());
+      } else {
+        vc.add(w.getValueVector());
+      }
     }
     vc.oContext = original.oContext;
     return vc;
   }
 
   private void cloneAndTransfer(VectorWrapper<?> wrapper) {
-    wrappers.add(wrapper.cloneAndTransfer());
+    wrappers.add(wrapper.cloneAndTransfer(oContext.getAllocator()));
   }
 
   public void addCollection(Iterable<ValueVector> vectors) {
@@ -205,7 +254,7 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
     schema = null;
     schemaChanged = true;
     int i = 0;
-    for (VectorWrapper w : wrappers){
+    for (VectorWrapper<?> w : wrappers){
       if (!w.isHyper() && old == w.getValueVector()) {
         w.clear();
         wrappers.set(i, new SimpleVectorWrapper<ValueVector>(newVector));
@@ -239,8 +288,8 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
 
     if (fieldIds.length == 1 && clazz != null && !clazz.isAssignableFrom(va.getVectorClass())) {
       throw new IllegalStateException(String.format(
-          "Failure while reading vector.  Expected vector class of %s but was holding vector class %s.",
-          clazz.getCanonicalName(), va.getVectorClass().getCanonicalName()));
+          "Failure while reading vector.  Expected vector class of %s but was holding vector class %s, field= %s ",
+          clazz.getCanonicalName(), va.getVectorClass().getCanonicalName(), va.getField()));
     }
 
     return va.getChildWrapper(fieldIds);
@@ -255,6 +304,10 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
       return null;
     }
     return va.getChildWrapper(fieldIds);
+  }
+
+  public boolean hasSchema() {
+    return schema != null;
   }
 
   public BatchSchema getSchema() {
@@ -294,6 +347,19 @@ public class VectorContainer implements Iterable<VectorWrapper<?>>, VectorAccess
     return recordCount;
   }
 
+  @Override
+  public SelectionVector2 getSelectionVector2() {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public SelectionVector4 getSelectionVector4() {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Clears the contained vectors.  (See {@link ValueVector#clear}).
+   */
   public void zeroVectors() {
     for (VectorWrapper<?> w : wrappers) {
       w.clear();

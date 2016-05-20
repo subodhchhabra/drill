@@ -17,10 +17,10 @@
  */
 package org.apache.drill.exec.planner.physical;
 
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptPlanner;
-import org.eigenbase.relopt.RelTraitDef;
-import org.eigenbase.relopt.volcano.RelSubset;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelTraitDef;
+import org.apache.calcite.plan.volcano.RelSubset;
+import org.apache.calcite.rel.RelNode;
 
 public class DrillDistributionTraitDef extends RelTraitDef<DrillDistributionTrait>{
   public static final DrillDistributionTraitDef INSTANCE = new DrillDistributionTraitDef();
@@ -72,6 +72,11 @@ public class DrillDistributionTraitDef extends RelTraitDef<DrillDistributionTrai
         return null;
     }
 
+    // It is only possible to apply a distribution trait to a DRILL_PHYSICAL convention.
+    if (rel.getConvention() != Prel.DRILL_PHYSICAL) {
+      return null;
+    }
+
     switch(toDist.getType()){
       // UnionExchange, HashToRandomExchange, OrderedPartitionExchange and BroadcastExchange destroy the ordering property,
       // therefore RelCollation is set to default, which is EMPTY.
@@ -79,15 +84,17 @@ public class DrillDistributionTraitDef extends RelTraitDef<DrillDistributionTrai
         return new UnionExchangePrel(rel.getCluster(), planner.emptyTraitSet().plus(Prel.DRILL_PHYSICAL).plus(toDist), rel);
       case HASH_DISTRIBUTED:
         return new HashToRandomExchangePrel(rel.getCluster(), planner.emptyTraitSet().plus(Prel.DRILL_PHYSICAL).plus(toDist), rel,
-                                            toDist.getFields());
+                                             toDist.getFields());
       case RANGE_DISTRIBUTED:
         return new OrderedPartitionExchangePrel(rel.getCluster(), planner.emptyTraitSet().plus(Prel.DRILL_PHYSICAL).plus(toDist), rel);
       case BROADCAST_DISTRIBUTED:
         return new BroadcastExchangePrel(rel.getCluster(), planner.emptyTraitSet().plus(Prel.DRILL_PHYSICAL).plus(toDist), rel);
+      case ANY:
+        // If target is "any", any input would satisfy "any". Return input directly.
+        return rel;
       default:
         return null;
     }
-
   }
 
 }

@@ -17,43 +17,79 @@
  */
 package org.apache.drill.exec.planner.common;
 
-import java.util.BitSet;
 import java.util.List;
 
+import org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.expr.holders.IntHolder;
+import org.apache.drill.exec.planner.cost.DrillCostBase;
 import org.apache.drill.exec.planner.cost.DrillCostBase.DrillCostFactory;
-import org.eigenbase.rel.AggregateCall;
-import org.eigenbase.rel.AggregateRelBase;
-import org.eigenbase.rel.InvalidRelException;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelOptCost;
-import org.eigenbase.relopt.RelOptPlanner;
-import org.eigenbase.relopt.RelTraitSet;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.rel.core.Aggregate;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.InvalidRelException;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.util.ImmutableBitSet;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptCost;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.drill.exec.planner.logical.DrillAggregateRel;
+import org.apache.drill.exec.planner.physical.PrelUtil;
+import org.pentaho.aggdes.algorithm.impl.Cost;
 
 
 /**
  * Base class for logical and physical Aggregations implemented in Drill
  */
-public abstract class DrillAggregateRelBase extends AggregateRelBase implements DrillRelNode {
+public abstract class DrillAggregateRelBase extends Aggregate implements DrillRelNode {
 
-  public DrillAggregateRelBase(RelOptCluster cluster, RelTraitSet traits, RelNode child, BitSet groupSet,
-      List<AggregateCall> aggCalls) throws InvalidRelException {
-    super(cluster, traits, child, groupSet, aggCalls);
+  public DrillAggregateRelBase(RelOptCluster cluster, RelTraitSet traits, RelNode child, boolean indicator,
+      ImmutableBitSet groupSet, List<ImmutableBitSet> groupSets, List<AggregateCall> aggCalls) throws InvalidRelException {
+    super(cluster, traits, child, indicator, groupSet, groupSets, aggCalls);
   }
 
-  @Override
-  public RelOptCost computeSelfCost(RelOptPlanner planner) {
-    for (AggregateCall aggCall : getAggCallList()) {
-      String name = aggCall.getAggregation().getName();
-      // For avg, stddev_pop, stddev_samp, var_pop and var_samp, the ReduceAggregatesRule is supposed
-      // to convert them to use sum and count. Here, we make the cost of the original functions high
-      // enough such that the planner does not choose them and instead chooses the rewritten functions.
-      if (name.equals("AVG") || name.equals("STDDEV_POP") || name.equals("STDDEV_SAMP")
-          || name.equals("VAR_POP") || name.equals("VAR_SAMP")) {
-        return ((DrillCostFactory)planner.getCostFactory()).makeHugeCost();
-      }
+
+  /**
+   * Estimate cost of hash agg. Called by DrillAggregateRel.computeSelfCost() and HashAggPrel.computeSelfCost()
+  */
+  protected RelOptCost computeHashAggCost(RelOptPlanner planner) {
+    if(PrelUtil.getSettings(getCluster()).useDefaultCosting()) {
+      return super.computeSelfCost(planner).multiplyBy(.1);
     }
-    return ((DrillCostFactory)planner.getCostFactory()).makeTinyCost();
+    RelNode child = this.getInput();
+    double inputRows = RelMetadataQuery.getRowCount(child);
+
+    int numGroupByFields = this.getGroupCount();
+    int numAggrFields = this.aggCalls.size();
+    // cpu cost of hashing each grouping key
+    double cpuCost = DrillCostBase.HASH_CPU_COST * numGroupByFields * inputRows;
+    // add cpu cost for computing the aggregate functions
+    cpuCost += DrillCostBase.FUNC_CPU_COST * numAggrFields * inputRows;
+    double diskIOCost = 0; // assume in-memory for now until we enforce operator-level memory constraints
+
+    // TODO: use distinct row count
+    // + hash table template stuff
+    double factor = PrelUtil.getPlannerSettings(planner).getOptions()
+        .getOption(ExecConstants.HASH_AGG_TABLE_FACTOR_KEY).float_val;
+    long fieldWidth = PrelUtil.getPlannerSettings(planner).getOptions()
+        .getOption(ExecConstants.AVERAGE_FIELD_WIDTH_KEY).num_val;
+
+    // table + hashValues + links
+    double memCost =
+        (
+            (fieldWidth * numGroupByFields) +
+                IntHolder.WIDTH +
+                IntHolder.WIDTH
+        ) * inputRows * factor;
+
+    DrillCostFactory costFactory = (DrillCostFactory) planner.getCostFactory();
+    return costFactory.makeCost(inputRows, cpuCost, diskIOCost, 0 /* network cost */, memCost);
+
+  }
+
+  protected RelOptCost computeLogicalAggCost(RelOptPlanner planner) {
+    // Similar to Join cost estimation, use HashAgg cost during the logical planning.
+    return computeHashAggCost(planner);
   }
 
 }

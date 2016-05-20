@@ -17,11 +17,14 @@
  */
 package org.apache.drill.exec.util;
 
+import org.apache.drill.exec.expr.fn.impl.DateUtility;
 import org.apache.drill.exec.ops.FragmentContext;
+import org.apache.drill.exec.proto.BitControl.QueryContextInformation;
 import org.apache.drill.exec.proto.ExecProtos;
 import org.apache.drill.exec.proto.helper.QueryIdHelper;
 
 public class Utilities {
+
   public static String getFileNameForQueryFragment(FragmentContext context, String location, String tag) {
      /*
      * From the context, get the query id, major fragment id, minor fragment id. This will be used as the file name to
@@ -37,5 +40,31 @@ public class Utilities {
     String fileName = String.format("%s//%s_%s_%s_%s", location, qid, majorFragmentId, minorFragmentId, tag);
 
     return fileName;
+  }
+
+  /**
+   * Create QueryContextInformation with given <i>defaultSchemaName</i>. Rest of the members of the
+   * QueryContextInformation is derived from the current state of the process.
+   *
+   * @param defaultSchemaName
+   * @return
+   */
+  public static QueryContextInformation createQueryContextInfo(final String defaultSchemaName) {
+    final long queryStartTime = System.currentTimeMillis();
+    final int timeZone = DateUtility.getIndex(System.getProperty("user.timezone"));
+    return QueryContextInformation.newBuilder()
+        .setDefaultSchemaName(defaultSchemaName)
+        .setQueryStartTime(queryStartTime)
+        .setTimeZone(timeZone)
+        .build();
+  }
+
+  /**
+   * Read the manifest file and get the Drill version number
+   * @return
+   */
+  public static String getDrillVersion() {
+      String v = Utilities.class.getPackage().getImplementationVersion();
+      return v;
   }
 }

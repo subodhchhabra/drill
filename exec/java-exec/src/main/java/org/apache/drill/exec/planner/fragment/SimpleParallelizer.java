@@ -17,33 +17,28 @@
  */
 package org.apache.drill.exec.planner.fragment;
 
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Sets;
-import com.google.common.collect.Iterators;
-import com.google.common.collect.Ordering;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.common.util.DrillStringUtils;
 import org.apache.drill.exec.ExecConstants;
-import org.apache.drill.exec.expr.fn.impl.DateUtility;
 import org.apache.drill.exec.ops.QueryContext;
-import org.apache.drill.exec.physical.EndpointAffinity;
+import org.apache.drill.exec.physical.MinorFragmentEndpoint;
 import org.apache.drill.exec.physical.PhysicalOperatorSetupException;
+import org.apache.drill.exec.physical.base.AbstractPhysicalVisitor;
 import org.apache.drill.exec.physical.base.Exchange.ParallelizationDependency;
 import org.apache.drill.exec.physical.base.FragmentRoot;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
+import org.apache.drill.exec.physical.base.Receiver;
 import org.apache.drill.exec.planner.PhysicalPlanReader;
 import org.apache.drill.exec.planner.fragment.Fragment.ExchangeFragmentPair;
 import org.apache.drill.exec.planner.fragment.Materializer.IndexedFragmentNode;
+import org.apache.drill.exec.proto.BitControl.Collector;
 import org.apache.drill.exec.proto.BitControl.PlanFragment;
+import org.apache.drill.exec.proto.BitControl.QueryContextInformation;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
 import org.apache.drill.exec.proto.UserBitShared.QueryId;
@@ -54,8 +49,10 @@ import org.apache.drill.exec.work.QueryWorkUnit;
 import org.apache.drill.exec.work.foreman.ForemanSetupException;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 /**
  * The simple parallelizer determines the level of parallelization of a plan based on the cost of the underlying
@@ -63,16 +60,8 @@ import com.google.common.collect.Lists;
  * parallelization for each major fragment will be determined.  Once the amount of parallelization is done, assignment
  * is done based on round robin assignment ordered by operator affinity (locality) to available execution Drillbits.
  */
-public class SimpleParallelizer {
+public class SimpleParallelizer implements ParallelizationParameters {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SimpleParallelizer.class);
-
-  private static final Ordering<EndpointAffinity> ENDPOINT_AFFINITY_ORDERING = Ordering.from(new Comparator<EndpointAffinity>() {
-    @Override
-    public int compare(EndpointAffinity o1, EndpointAffinity o2) {
-      // Sort in descending order of affinity values
-      return Double.compare(o2.getAffinity(), o1.getAffinity());
-    }
-  });
 
   private final long parallelizationThreshold;
   private final int maxWidthPerNode;
@@ -95,6 +84,25 @@ public class SimpleParallelizer {
     this.affinityFactor = affinityFactor;
   }
 
+  @Override
+  public long getSliceTarget() {
+    return parallelizationThreshold;
+  }
+
+  @Override
+  public int getMaxWidthPerNode() {
+    return maxWidthPerNode;
+  }
+
+  @Override
+  public int getMaxGlobalWidth() {
+    return maxGlobalWidth;
+  }
+
+  @Override
+  public double getAffinityFactor() {
+    return affinityFactor;
+  }
 
   /**
    * Generate a set of assigned fragments based on the provided fragment tree. Do not allow parallelization stages
@@ -107,14 +115,48 @@ public class SimpleParallelizer {
    * @param reader          Tool used to read JSON plans
    * @param rootFragment    The root node of the PhysicalPlan that we will be parallelizing.
    * @param session         UserSession of user who launched this query.
+   * @param queryContextInfo Info related to the context when query has started.
    * @return The list of generated PlanFragment protobuf objects to be assigned out to the individual nodes.
    * @throws ExecutionSetupException
    */
   public QueryWorkUnit getFragments(OptionList options, DrillbitEndpoint foremanNode, QueryId queryId,
       Collection<DrillbitEndpoint> activeEndpoints, PhysicalPlanReader reader, Fragment rootFragment,
-      UserSession session) throws ExecutionSetupException {
+      UserSession session, QueryContextInformation queryContextInfo) throws ExecutionSetupException {
 
-    final PlanningSet planningSet = new PlanningSet();
+    final PlanningSet planningSet = getFragmentsHelper(activeEndpoints, rootFragment);
+    return generateWorkUnit(
+        options, foremanNode, queryId, reader, rootFragment, planningSet, session, queryContextInfo);
+  }
+
+  /**
+   * Create multiple physical plans from original query planning, it will allow execute them eventually independently
+   * @param options
+   * @param foremanNode
+   * @param queryId
+   * @param activeEndpoints
+   * @param reader
+   * @param rootFragment
+   * @param session
+   * @param queryContextInfo
+   * @return
+   * @throws ExecutionSetupException
+   */
+  public List<QueryWorkUnit> getSplitFragments(OptionList options, DrillbitEndpoint foremanNode, QueryId queryId,
+      Collection<DrillbitEndpoint> activeEndpoints, PhysicalPlanReader reader, Fragment rootFragment,
+      UserSession session, QueryContextInformation queryContextInfo) throws ExecutionSetupException {
+    // no op
+    throw new UnsupportedOperationException("Use children classes");
+  }
+  /**
+   * Helper method to reuse the code for QueryWorkUnit(s) generation
+   * @param activeEndpoints
+   * @param rootFragment
+   * @return
+   * @throws ExecutionSetupException
+   */
+  protected PlanningSet getFragmentsHelper(Collection<DrillbitEndpoint> activeEndpoints, Fragment rootFragment) throws ExecutionSetupException {
+
+    PlanningSet planningSet = new PlanningSet();
 
     initFragmentWrappers(rootFragment, planningSet);
 
@@ -125,7 +167,7 @@ public class SimpleParallelizer {
       parallelizeFragment(wrapper, planningSet, activeEndpoints);
     }
 
-    return generateWorkUnit(options, foremanNode, queryId, reader, rootFragment, planningSet, session);
+    return planningSet;
   }
 
   // For every fragment, create a Wrapper in PlanningSet.
@@ -144,7 +186,7 @@ public class SimpleParallelizer {
    * @param planningSet
    * @return Returns a list of leaf fragments in fragment dependency graph.
    */
-  private Set<Wrapper> constructFragmentDependencyGraph(PlanningSet planningSet) {
+  private static Set<Wrapper> constructFragmentDependencyGraph(PlanningSet planningSet) {
 
     // Set up dependency of fragments based on the affinity of exchange that separates the fragments.
     for(Wrapper currentFragmentWrapper : planningSet) {
@@ -202,132 +244,22 @@ public class SimpleParallelizer {
       }
     }
 
-    Fragment fragment = fragmentWrapper.getNode();
-
-    // Step 1: Find stats. Stats include various factors including cost of physical operators, parallelizability of
+    // Find stats. Stats include various factors including cost of physical operators, parallelizability of
     // work in physical operator and affinity of physical operator to certain nodes.
-    fragment.getRoot().accept(new StatsCollector(planningSet), fragmentWrapper);
+    fragmentWrapper.getNode().getRoot().accept(new StatsCollector(planningSet), fragmentWrapper);
 
-    // Step 2: Find the parallelization width of fragment
-
-    final Stats stats = fragmentWrapper.getStats();
-    final ParallelizationInfo parallelizationInfo = stats.getParallelizationInfo();
-
-    // 2.1 Use max cost of all operators in this fragment; this is consistent with the
-    //     calculation that ExcessiveExchangeRemover uses
-    // 2.1. Find the parallelization based on cost
-    int width = (int) Math.ceil(stats.getMaxCost() / parallelizationThreshold);
-
-    // 2.2. Cap the parallelization width by fragment level width limit and system level per query width limit
-    width = Math.min(width, Math.min(parallelizationInfo.getMaxWidth(), maxGlobalWidth));
-
-    // 2.3. Cap the parallelization width by system level per node width limit
-    width = Math.min(width, maxWidthPerNode * activeEndpoints.size());
-
-    // 2.4. Make sure width is at least the min width enforced by operators
-    width = Math.max(parallelizationInfo.getMinWidth(), width);
-
-    // 2.4. Make sure width is at most the max width enforced by operators
-    width = Math.min(parallelizationInfo.getMaxWidth(), width);
-
-    // 2.5 Finally make sure the width is at least one
-    width = Math.max(1, width);
-
-    fragmentWrapper.setWidth(width);
-
-    List<DrillbitEndpoint> assignedEndpoints = findEndpoints(activeEndpoints,
-        parallelizationInfo.getEndpointAffinityMap(), fragmentWrapper.getWidth());
-    fragmentWrapper.assignEndpoints(assignedEndpoints);
+    fragmentWrapper.getStats().getDistributionAffinity()
+        .getFragmentParallelizer()
+        .parallelizeFragment(fragmentWrapper, this, activeEndpoints);
   }
 
-  // Assign endpoints based on the given endpoint list, affinity map and width.
-  private List<DrillbitEndpoint> findEndpoints(Collection<DrillbitEndpoint> activeEndpoints,
-      Map<DrillbitEndpoint, EndpointAffinity> endpointAffinityMap, final int width)
-      throws PhysicalOperatorSetupException {
-
-    final List<DrillbitEndpoint> endpoints = Lists.newArrayList();
-
-    if (endpointAffinityMap.size() > 0) {
-      // Get EndpointAffinity list sorted in descending order of affinity values
-      List<EndpointAffinity> sortedAffinityList = ENDPOINT_AFFINITY_ORDERING.immutableSortedCopy(endpointAffinityMap.values());
-
-      // Find the number of mandatory nodes (nodes with +infinity affinity).
-      int numRequiredNodes = 0;
-      for(EndpointAffinity ep : sortedAffinityList) {
-        if (ep.isAssignmentRequired()) {
-          numRequiredNodes++;
-        } else {
-          // As the list is sorted in descending order of affinities, we don't need to go beyond the first occurrance
-          // of non-mandatory node
-          break;
-        }
-      }
-
-      if (width < numRequiredNodes) {
-        throw new PhysicalOperatorSetupException("Can not parallelize the fragment as the parallelization width is " +
-            "less than the number of mandatory nodes (nodes with +INFINITE affinity).");
-      }
-
-      // Find the maximum number of slots which should go to endpoints with affinity (See DRILL-825 for details)
-      int affinedSlots =
-          Math.max(1, (int) (affinityFactor * width / activeEndpoints.size())) * sortedAffinityList.size();
-
-      // Make sure affined slots is at least the number of mandatory nodes
-      affinedSlots = Math.max(affinedSlots, numRequiredNodes);
-
-      // Cap the affined slots to max parallelization width
-      affinedSlots = Math.min(affinedSlots, width);
-
-      Iterator<EndpointAffinity> affinedEPItr = Iterators.cycle(sortedAffinityList);
-
-      // Keep adding until we have selected "affinedSlots" number of endpoints.
-      while(endpoints.size() < affinedSlots) {
-        EndpointAffinity ea = affinedEPItr.next();
-        endpoints.add(ea.getEndpoint());
-      }
-    }
-
-    // add remaining endpoints if required
-    if (endpoints.size() < width) {
-      // Get a list of endpoints that are not part of the affinity endpoint list
-      List<DrillbitEndpoint> endpointsWithNoAffinity;
-      final Set<DrillbitEndpoint> endpointsWithAffinity = endpointAffinityMap.keySet();
-
-      if (endpointAffinityMap.size() > 0) {
-        endpointsWithNoAffinity = Lists.newArrayList();
-        for (DrillbitEndpoint ep : activeEndpoints) {
-          if (!endpointsWithAffinity.contains(ep)) {
-            endpointsWithNoAffinity.add(ep);
-          }
-        }
-      } else {
-        endpointsWithNoAffinity = Lists.newArrayList(activeEndpoints); // Need to create a copy instead of an
-        // immutable copy, because we need to shuffle the list (next statement) and Collections.shuffle() doesn't
-        // support immutable copy as input.
-      }
-
-      // round robin with random start.
-      Collections.shuffle(endpointsWithNoAffinity, ThreadLocalRandom.current());
-      Iterator<DrillbitEndpoint> otherEPItr =
-          Iterators.cycle(endpointsWithNoAffinity.size() > 0 ? endpointsWithNoAffinity : endpointsWithAffinity);
-      while (endpoints.size() < width) {
-        endpoints.add(otherEPItr.next());
-      }
-    }
-
-    return endpoints;
-  }
-
-  private QueryWorkUnit generateWorkUnit(OptionList options, DrillbitEndpoint foremanNode, QueryId queryId,
+  protected QueryWorkUnit generateWorkUnit(OptionList options, DrillbitEndpoint foremanNode, QueryId queryId,
       PhysicalPlanReader reader, Fragment rootNode, PlanningSet planningSet,
-      UserSession session) throws ExecutionSetupException {
+      UserSession session, QueryContextInformation queryContextInfo) throws ExecutionSetupException {
     List<PlanFragment> fragments = Lists.newArrayList();
 
     PlanFragment rootFragment = null;
     FragmentRoot rootOperator = null;
-
-    long queryStartTime = System.currentTimeMillis();
-    int timeZone = DateUtility.getIndex(System.getProperty("user.timezone"));
 
     // now we generate all the individual plan fragments and associated assignments. Note, we need all endpoints
     // assigned before we can materialize, so we start a new loop here rather than utilizing the previous one.
@@ -368,18 +300,19 @@ public class SimpleParallelizer {
             .setMinorFragmentId(minorFragmentId) //
             .setQueryId(queryId) //
             .build();
+
         PlanFragment fragment = PlanFragment.newBuilder() //
             .setForeman(foremanNode) //
             .setFragmentJson(plan) //
             .setHandle(handle) //
             .setAssignment(wrapper.getAssignedEndpoint(minorFragmentId)) //
             .setLeafFragment(isLeafFragment) //
-            .setQueryStartTime(queryStartTime)
-            .setTimeZone(timeZone)//
+            .setContext(queryContextInfo)
             .setMemInitial(wrapper.getInitialAllocation())//
             .setMemMax(wrapper.getMaxAllocation())
             .setOptionsJson(optionsData)
             .setCredentials(session.getCredentials())
+            .addAllCollector(CountRequiredFragments.getCollectors(root))
             .build();
 
         if (isRootNode) {
@@ -394,5 +327,46 @@ public class SimpleParallelizer {
     }
 
     return new QueryWorkUnit(rootOperator, rootFragment, fragments);
+  }
+
+
+  /**
+   * Designed to setup initial values for arriving fragment accounting.
+   */
+  protected static class CountRequiredFragments extends AbstractPhysicalVisitor<Void, List<Collector>, RuntimeException> {
+    private static final CountRequiredFragments INSTANCE = new CountRequiredFragments();
+
+    public static List<Collector> getCollectors(PhysicalOperator root) {
+      List<Collector> collectors = Lists.newArrayList();
+      root.accept(INSTANCE, collectors);
+      return collectors;
+    }
+
+    @Override
+    public Void visitReceiver(Receiver receiver, List<Collector> collectors) throws RuntimeException {
+      List<MinorFragmentEndpoint> endpoints = receiver.getProvidingEndpoints();
+      List<Integer> list = new ArrayList<>(endpoints.size());
+      for (MinorFragmentEndpoint ep : endpoints) {
+        list.add(ep.getId());
+      }
+
+
+      collectors.add(Collector.newBuilder()
+        .setIsSpooling(receiver.isSpooling())
+        .setOppositeMajorFragmentId(receiver.getOppositeMajorFragmentId())
+        .setSupportsOutOfOrder(receiver.supportsOutOfOrderExchange())
+          .addAllIncomingMinorFragment(list)
+          .build());
+      return null;
+    }
+
+    @Override
+    public Void visitOp(PhysicalOperator op, List<Collector> collectors) throws RuntimeException {
+      for (PhysicalOperator o : op) {
+        o.accept(this, collectors);
+      }
+      return null;
+    }
+
   }
 }

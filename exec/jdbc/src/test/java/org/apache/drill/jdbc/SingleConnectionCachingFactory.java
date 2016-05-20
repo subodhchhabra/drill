@@ -23,7 +23,9 @@ import java.sql.SQLException;
 /**
  * A connection factory that creates and caches a single connection instance.
  *
- * Not thread safe.
+ * <p>
+ *   Not thread safe.
+ * </p>
  */
 public class SingleConnectionCachingFactory implements CachingConnectionFactory {
 
@@ -34,20 +36,29 @@ public class SingleConnectionCachingFactory implements CachingConnectionFactory 
     this.delegate = delegate;
   }
 
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   For this implementation, calls to {@code createConnection} without any
+   *   intervening calls to {@link #closeConnections} return the same Connection
+   *   instance.
+   * </p>
+   */
   @Override
-  public Connection createConnection(ConnectionInfo info) throws Exception {
+  public Connection getConnection(ConnectionInfo info) throws Exception {
     if (connection == null) {
-      connection = delegate.createConnection(info);
+      connection = delegate.getConnection(info);
     } else {
-      JdbcTest.changeSchemaIfSupplied(connection, info.getParamsAsProperties());
+      JdbcTestBase.changeSchemaIfSupplied(connection, info.getParamsAsProperties());
     }
     return new NonClosableConnection(connection);
   }
 
   @Override
-  public void close() throws SQLException {
+  public void closeConnections() throws SQLException {
     if (connection != null) {
       connection.close();
+      connection = null;
     }
   }
 }

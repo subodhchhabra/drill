@@ -20,27 +20,35 @@ package org.apache.drill.exec.planner.logical;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.google.common.collect.Lists;
+import org.apache.calcite.rel.logical.LogicalFilter;
+import org.apache.calcite.rel.logical.LogicalJoin;
+import org.apache.calcite.rex.RexShuttle;
+import org.apache.calcite.rex.RexUtil;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.exec.exception.UnsupportedOperatorCollector;
 import org.apache.drill.exec.planner.StarColumnHelper;
+import org.apache.drill.exec.planner.sql.DrillCalciteSqlWrapper;
 import org.apache.drill.exec.planner.sql.DrillOperatorTable;
+import org.apache.drill.exec.planner.sql.parser.DrillCalciteWrapperUtility;
+import org.apache.drill.exec.util.ApproximateStringMatcher;
 import org.apache.drill.exec.work.foreman.SqlUnsupportedException;
-import org.eigenbase.rel.AggregateCall;
-import org.eigenbase.rel.AggregateRel;
-import org.eigenbase.rel.ProjectRel;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.rel.RelShuttleImpl;
-import org.eigenbase.rel.UnionRel;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.reltype.RelDataTypeField;
-import org.eigenbase.rex.RexBuilder;
-import org.eigenbase.rex.RexCall;
-import org.eigenbase.rex.RexLiteral;
-import org.eigenbase.rex.RexNode;
-import org.eigenbase.sql.SqlFunction;
-import org.eigenbase.sql.SqlOperator;
-import org.eigenbase.sql.fun.SqlSingleValueAggFunction;
-import org.eigenbase.util.NlsString;
+import org.apache.calcite.rel.core.AggregateCall;
+import org.apache.calcite.rel.logical.LogicalAggregate;
+import org.apache.calcite.rel.logical.LogicalProject;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelShuttleImpl;
+import org.apache.calcite.rel.logical.LogicalUnion;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.fun.SqlSingleValueAggFunction;
+import org.apache.calcite.util.NlsString;
 
 /**
  * This class rewrites all the project expression that contain convert_to/ convert_from
@@ -51,47 +59,51 @@ import org.eigenbase.util.NlsString;
  * output type and we will fire/ ignore certain rules (merge project rule) based on this fact.
  */
 public class PreProcessLogicalRel extends RelShuttleImpl {
+
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PreProcessLogicalRel.class);
+
   private RelDataTypeFactory factory;
   private DrillOperatorTable table;
   private UnsupportedOperatorCollector unsupportedOperatorCollector;
-  private static PreProcessLogicalRel INSTANCE = null;
+  private final UnwrappingExpressionVisitor unwrappingExpressionVisitor;
 
-  public static void initialize(RelDataTypeFactory factory, DrillOperatorTable table) {
-    if(INSTANCE == null) {
-      INSTANCE = new PreProcessLogicalRel(factory, table);
-    }
+  public static PreProcessLogicalRel createVisitor(RelDataTypeFactory factory, DrillOperatorTable table, RexBuilder rexBuilder) {
+    return new PreProcessLogicalRel(factory, table, rexBuilder);
   }
 
-  public static PreProcessLogicalRel getVisitor() {
-    if(INSTANCE == null) {
-      throw new IllegalStateException("PreProcessLogicalRel is not initialized properly");
-    }
-
-    return INSTANCE;
-  }
-
-  private PreProcessLogicalRel(RelDataTypeFactory factory, DrillOperatorTable table) {
+  private PreProcessLogicalRel(RelDataTypeFactory factory, DrillOperatorTable table, RexBuilder rexBuilder) {
     super();
     this.factory = factory;
     this.table = table;
     this.unsupportedOperatorCollector = new UnsupportedOperatorCollector();
+    this.unwrappingExpressionVisitor = new UnwrappingExpressionVisitor(rexBuilder);
   }
 
   @Override
-  public RelNode visit(AggregateRel aggregate) {
+  public RelNode visit(LogicalAggregate aggregate) {
     for(AggregateCall aggregateCall : aggregate.getAggCallList()) {
       if(aggregateCall.getAggregation() instanceof SqlSingleValueAggFunction) {
         unsupportedOperatorCollector.setException(SqlUnsupportedException.ExceptionType.FUNCTION,
-            "1937", "Non-scalar sub-query used in an expression");
+            "Non-scalar sub-query used in an expression\n" +
+            "See Apache Drill JIRA: DRILL-1937");
         throw new UnsupportedOperationException();
       }
     }
-
-    return visitChild(aggregate, 0, aggregate.getChild());
+    return visitChild(aggregate, 0, aggregate.getInput());
   }
 
   @Override
-  public RelNode visit(ProjectRel project) {
+  public RelNode visit(LogicalProject project) {
+    final List<RexNode> projExpr = Lists.newArrayList();
+    for(RexNode rexNode : project.getChildExps()) {
+      projExpr.add(rexNode.accept(unwrappingExpressionVisitor));
+    }
+
+    project =  project.copy(project.getTraitSet(),
+        project.getInput(),
+        projExpr,
+        project.getRowType());
+
     List<RexNode> exprList = new ArrayList<>();
     boolean rewrite = false;
 
@@ -104,8 +116,26 @@ public class PreProcessLogicalRel extends RelShuttleImpl {
 
         // check if its a convert_from or convert_to function
         if (functionName.equalsIgnoreCase("convert_from") || functionName.equalsIgnoreCase("convert_to")) {
-          assert nArgs == 2 && function.getOperands().get(1) instanceof RexLiteral;
-          String literal = ((NlsString) (((RexLiteral) function.getOperands().get(1)).getValue())).getValue();
+          String literal;
+          if (nArgs == 2) {
+            if (function.getOperands().get(1) instanceof RexLiteral) {
+              try {
+                literal = ((NlsString) (((RexLiteral) function.getOperands().get(1)).getValue())).getValue();
+              } catch (final ClassCastException e) {
+                // Caused by user entering a value with a non-string literal
+                throw getConvertFunctionInvalidTypeException(function);
+              }
+            } else {
+              // caused by user entering a non-literal
+              throw getConvertFunctionInvalidTypeException(function);
+            }
+          } else {
+            // Second operand is missing
+            throw UserException.parseError()
+                    .message("'%s' expects a string literal as a second argument.", functionName)
+                    .build(logger);
+          }
+
           RexBuilder builder = new RexBuilder(factory);
 
           // construct the new function name based on the input argument
@@ -113,7 +143,10 @@ public class PreProcessLogicalRel extends RelShuttleImpl {
 
           // Look up the new function name in the drill operator table
           List<SqlOperator> operatorList = table.getSqlOperator(newFunctionName);
-          assert operatorList.size() > 0;
+          if (operatorList.size() == 0) {
+            // User typed in an invalid type name
+            throw getConvertFunctionException(functionName, literal);
+          }
           SqlFunction newFunction = null;
 
           // Find the SqlFunction with the correct args
@@ -123,7 +156,10 @@ public class PreProcessLogicalRel extends RelShuttleImpl {
               break;
             }
           }
-          assert newFunction != null;
+          if (newFunction == null) {
+            // we are here because we found some dummy convert function. (See DummyConvertFrom and DummyConvertTo)
+            throw getConvertFunctionException(functionName, literal);
+          }
 
           // create the new expression to be used in the rewritten project
           newExpr = builder.makeCall(newFunction, function.getOperands().subList(0, 1));
@@ -134,20 +170,44 @@ public class PreProcessLogicalRel extends RelShuttleImpl {
     }
 
     if (rewrite == true) {
-      ProjectRel newProject = project.copy(project.getTraitSet(), project.getInput(0), exprList, project.getRowType());
-      return visitChild(newProject, 0, project.getChild());
+      LogicalProject newProject = project.copy(project.getTraitSet(), project.getInput(0), exprList, project.getRowType());
+      return visitChild(newProject, 0, project.getInput());
     }
 
-    return visitChild(project, 0, project.getChild());
+    return visitChild(project, 0, project.getInput());
   }
 
   @Override
-  public RelNode visit(UnionRel union) {
+  public RelNode visit(LogicalFilter filter) {
+    final RexNode condition = filter.getCondition().accept(unwrappingExpressionVisitor);
+    filter = filter.copy(
+        filter.getTraitSet(),
+        filter.getInput(),
+        condition);
+    return visitChild(filter, 0, filter.getInput());
+  }
+
+  @Override
+  public RelNode visit(LogicalJoin join) {
+    final RexNode conditionExpr = join.getCondition().accept(unwrappingExpressionVisitor);
+    join = join.copy(join.getTraitSet(),
+        conditionExpr,
+        join.getLeft(),
+        join.getRight(),
+        join.getJoinType(),
+        join.isSemiJoinDone());
+
+    return visitChildren(join);
+  }
+
+  @Override
+  public RelNode visit(LogicalUnion union) {
     for(RelNode child : union.getInputs()) {
       for(RelDataTypeField dataField : child.getRowType().getFieldList()) {
         if(dataField.getName().contains(StarColumnHelper.STAR_COLUMN)) {
           unsupportedOperatorCollector.setException(SqlUnsupportedException.ExceptionType.RELATIONAL,
-            "2414", "Union-all over schema-less tables must specify the columns explicitly");
+              "Union-All over schema-less tables must specify the columns explicitly\n" +
+              "See Apache Drill JIRA: DRILL-2414");
           throw new UnsupportedOperationException();
         }
       }
@@ -156,7 +216,60 @@ public class PreProcessLogicalRel extends RelShuttleImpl {
     return visitChildren(union);
   }
 
+  private UserException getConvertFunctionInvalidTypeException(final RexCall function) {
+    // Caused by user entering a value with a numeric type
+    final String functionName = function.getOperator().getName();
+    final String typeName = function.getOperands().get(1).getType().getFullTypeString();
+    return UserException.parseError()
+            .message("Invalid type %s passed as second argument to function '%s'. " +
+                    "The function expects a literal argument.",
+                    typeName,
+                    functionName)
+            .build(logger);
+  }
+
+  private UserException getConvertFunctionException(final String functionName, final String typeName) {
+    final String newFunctionName = functionName + typeName;
+    final String typeNameToPrint = typeName.length()==0 ? "<empty_string>" : typeName;
+    final UserException.Builder exceptionBuilder = UserException.unsupportedError()
+            .message("%s does not support conversion %s type '%s'.", functionName, functionName.substring(8).toLowerCase(), typeNameToPrint);
+    // Build a nice error message
+    if (typeName.length()>0) {
+      List<String> ops = new ArrayList<>();
+      for (SqlOperator op : table.getOperatorList()) {
+        ops.add(op.getName());
+      }
+      final String bestMatch = ApproximateStringMatcher.getBestMatch(ops, newFunctionName);
+      if (bestMatch != null && bestMatch.length() > 0 && bestMatch.toLowerCase().startsWith("convert")) {
+        final StringBuilder s = new StringBuilder("Did you mean ")
+                .append(bestMatch.substring(functionName.length()))
+                .append("?");
+        exceptionBuilder.addContext(s.toString());
+      }
+    }
+    return exceptionBuilder.build(logger);
+  }
+
   public void convertException() throws SqlUnsupportedException {
     unsupportedOperatorCollector.convertException();
+  }
+
+  private static class UnwrappingExpressionVisitor extends RexShuttle {
+    private final RexBuilder rexBuilder;
+
+    private UnwrappingExpressionVisitor(RexBuilder rexBuilder) {
+      this.rexBuilder = rexBuilder;
+    }
+
+    @Override
+    public RexNode visitCall(final RexCall call) {
+      final List<RexNode> clonedOperands = visitList(call.operands, new boolean[]{true});
+      final SqlOperator sqlOperator = DrillCalciteWrapperUtility.extractSqlOperatorFromWrapper(call.getOperator());
+      return RexUtil.flatten(rexBuilder,
+          rexBuilder.makeCall(
+              call.getType(),
+              sqlOperator,
+              clonedOperands));
+    }
   }
 }

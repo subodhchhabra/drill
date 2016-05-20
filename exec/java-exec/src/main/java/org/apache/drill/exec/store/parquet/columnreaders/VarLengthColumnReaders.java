@@ -20,13 +20,11 @@ package org.apache.drill.exec.store.parquet.columnreaders;
 import io.netty.buffer.DrillBuf;
 
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.exec.expr.holders.Decimal28SparseHolder;
 import org.apache.drill.exec.expr.holders.Decimal38SparseHolder;
-import org.apache.drill.exec.expr.holders.NullableVarBinaryHolder;
-import org.apache.drill.exec.expr.holders.VarBinaryHolder;
-import org.apache.drill.exec.expr.holders.VarCharHolder;
 import org.apache.drill.exec.util.DecimalUtility;
 import org.apache.drill.exec.vector.Decimal28SparseVector;
 import org.apache.drill.exec.vector.Decimal38SparseVector;
@@ -37,9 +35,9 @@ import org.apache.drill.exec.vector.NullableVarCharVector;
 import org.apache.drill.exec.vector.VarBinaryVector;
 import org.apache.drill.exec.vector.VarCharVector;
 
-import parquet.column.ColumnDescriptor;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
 
 public class VarLengthColumnReaders {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(VarLengthColumnReaders.class);
@@ -58,18 +56,19 @@ public class VarLengthColumnReaders {
     @Override
     public boolean setSafe(int index, DrillBuf bytebuf, int start, int length) {
       int width = Decimal28SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length, schemaElement.getScale());
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length,
+          schemaElement.getScale());
       if (index >= decimal28Vector.getValueCapacity()) {
         return false;
       }
-      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal28Vector.getData(), index * width, schemaElement.getScale(),
+      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal28Vector.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal28SparseHolder.nDecimalDigits);
       return true;
     }
 
     @Override
     public int capacity() {
-      return decimal28Vector.getData().capacity();
+      return decimal28Vector.getBuffer().capacity();
     }
   }
 
@@ -87,11 +86,12 @@ public class VarLengthColumnReaders {
     @Override
     public boolean setSafe(int index, DrillBuf bytebuf, int start, int length) {
       int width = Decimal28SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length, schemaElement.getScale());
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length,
+          schemaElement.getScale());
       if (index >= nullableDecimal28Vector.getValueCapacity()) {
         return false;
       }
-      DecimalUtility.getSparseFromBigDecimal(intermediate, nullableDecimal28Vector.getData(), index * width, schemaElement.getScale(),
+      DecimalUtility.getSparseFromBigDecimal(intermediate, nullableDecimal28Vector.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal28SparseHolder.nDecimalDigits);
       nullableDecimal28Vector.getMutator().setIndexDefined(index);
       return true;
@@ -99,7 +99,7 @@ public class VarLengthColumnReaders {
 
     @Override
     public int capacity() {
-      return nullableDecimal28Vector.getData().capacity();
+      return nullableDecimal28Vector.getBuffer().capacity();
     }
   }
 
@@ -117,24 +117,25 @@ public class VarLengthColumnReaders {
     @Override
     public boolean setSafe(int index, DrillBuf bytebuf, int start, int length) {
       int width = Decimal38SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length, schemaElement.getScale());
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length,
+          schemaElement.getScale());
       if (index >= decimal28Vector.getValueCapacity()) {
         return false;
       }
-      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal28Vector.getData(), index * width, schemaElement.getScale(),
+      DecimalUtility.getSparseFromBigDecimal(intermediate, decimal28Vector.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal38SparseHolder.nDecimalDigits);
       return true;
     }
 
     @Override
     public int capacity() {
-      return decimal28Vector.getData().capacity();
+      return decimal28Vector.getBuffer().capacity();
     }
   }
 
   public static class NullableDecimal38Column extends NullableVarLengthValuesColumn<NullableDecimal38SparseVector> {
 
-    protected NullableDecimal38SparseVector nullableDecimal38Vector;
+    private final NullableDecimal38SparseVector nullableDecimal38Vector;
 
     NullableDecimal38Column(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                             ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, NullableDecimal38SparseVector v,
@@ -146,11 +147,13 @@ public class VarLengthColumnReaders {
     @Override
     public boolean setSafe(int index, DrillBuf bytebuf, int start, int length) {
       int width = Decimal38SparseHolder.WIDTH;
-      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length, schemaElement.getScale());
+      BigDecimal intermediate = DecimalUtility.getBigDecimalFromDrillBuf(bytebuf, start, length,
+          schemaElement.getScale());
       if (index >= nullableDecimal38Vector.getValueCapacity()) {
         return false;
       }
-      DecimalUtility.getSparseFromBigDecimal(intermediate, nullableDecimal38Vector.getData(), index * width, schemaElement.getScale(),
+
+      DecimalUtility.getSparseFromBigDecimal(intermediate, nullableDecimal38Vector.getBuffer(), index * width, schemaElement.getScale(),
               schemaElement.getPrecision(), Decimal38SparseHolder.nDecimalDigits);
       nullableDecimal38Vector.getMutator().setIndexDefined(index);
       return true;
@@ -158,20 +161,22 @@ public class VarLengthColumnReaders {
 
     @Override
     public int capacity() {
-      return nullableDecimal38Vector.getData().capacity();
+      return nullableDecimal38Vector.getBuffer().capacity();
     }
   }
 
   public static class VarCharColumn extends VarLengthValuesColumn<VarCharVector> {
 
     // store a hard reference to the vector (which is also stored in the superclass) to prevent repetitive casting
-    protected VarCharVector varCharVector;
+    protected final VarCharVector.Mutator mutator;
+    protected final VarCharVector varCharVector;
 
     VarCharColumn(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                   ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, VarCharVector v,
                   SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
       varCharVector = v;
+      mutator = v.getMutator();
     }
 
     @Override
@@ -182,28 +187,17 @@ public class VarLengthColumnReaders {
 
       if (usingDictionary) {
         currDictValToWrite = pageReader.dictionaryValueReader.readBytes();
-        DrillBuf b = DrillBuf.wrapByteBuffer(currDictValToWrite.toByteBuffer());
-        int st=0;
-        int len=currDictValToWrite.length();
-        VarCharHolder holder = new VarCharHolder();
-        holder.buffer=b;
-        holder.start=0;
-        holder.end=currDictValToWrite.length();
-        varCharVector.getMutator().setSafe(index, holder);
-      }
-      else {
-        VarCharHolder holder = new VarCharHolder();
-        holder.buffer=bytebuf;
-        holder.start=start;
-        holder.end=start+length;
-        varCharVector.getMutator().setSafe(index, holder);
+        ByteBuffer buf = currDictValToWrite.toByteBuffer();
+        mutator.setSafe(index, buf, buf.position(), currDictValToWrite.length());
+      } else {
+        mutator.setSafe(index, start, start + length, bytebuf);
       }
       return true;
     }
 
     @Override
     public int capacity() {
-      return varCharVector.getData().capacity();
+      return varCharVector.getBuffer().capacity();
     }
   }
 
@@ -230,31 +224,32 @@ public class VarLengthColumnReaders {
       }
 
       if (usingDictionary) {
-        DrillBuf b = DrillBuf.wrapByteBuffer(currDictValToWrite.toByteBuffer());
-        mutator.setSafe(index, 1, 0, currDictValToWrite.length(), b);
-      }
-      else {
-        mutator.setSafe(index, 1, start, start+length, value);
+        ByteBuffer buf = currDictValToWrite.toByteBuffer();
+        mutator.setSafe(index, buf, buf.position(), currDictValToWrite.length());
+      } else {
+        mutator.setSafe(index, 1, start, start + length, value);
       }
       return true;
     }
 
     @Override
     public int capacity() {
-      return vector.getData().capacity();
+      return vector.getBuffer().capacity();
     }
   }
 
   public static class VarBinaryColumn extends VarLengthValuesColumn<VarBinaryVector> {
 
     // store a hard reference to the vector (which is also stored in the superclass) to prevent repetitive casting
-    protected VarBinaryVector varBinaryVector;
+    private final VarBinaryVector varBinaryVector;
+    private final VarBinaryVector.Mutator mutator;
 
     VarBinaryColumn(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                     ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, VarBinaryVector v,
                     SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
       varBinaryVector = v;
+      mutator = v.getMutator();
     }
 
     @Override
@@ -265,28 +260,17 @@ public class VarLengthColumnReaders {
 
       if (usingDictionary) {
         currDictValToWrite = pageReader.dictionaryValueReader.readBytes();
-        DrillBuf b = DrillBuf.wrapByteBuffer(currDictValToWrite.toByteBuffer());
-        int st=0;
-        int len=currDictValToWrite.length();
-        VarBinaryHolder holder = new VarBinaryHolder();
-        holder.buffer=b;
-        holder.start=0;
-        holder.end=currDictValToWrite.length();
-        varBinaryVector.getMutator().setSafe(index, holder);
-      }
-      else {
-        VarBinaryHolder holder = new VarBinaryHolder();
-        holder.buffer=value;
-        holder.start=start;
-        holder.end=start+length;
-        varBinaryVector.getMutator().setSafe(index, holder);
+        ByteBuffer buf = currDictValToWrite.toByteBuffer();
+        mutator.setSafe(index, buf, buf.position(), currDictValToWrite.length());
+      } else {
+        mutator.setSafe(index, start, start + length, value);
       }
       return true;
     }
 
     @Override
     public int capacity() {
-      return varBinaryVector.getData().capacity();
+      return varBinaryVector.getBuffer().capacity();
     }
   }
 
@@ -295,14 +279,17 @@ public class VarLengthColumnReaders {
     int nullsRead;
     boolean currentValNull = false;
     // store a hard reference to the vector (which is also stored in the superclass) to prevent repetitive casting
-    protected org.apache.drill.exec.vector.NullableVarBinaryVector nullableVarBinaryVector;
+    private final NullableVarBinaryVector nullableVarBinaryVector;
+    private final NullableVarBinaryVector.Mutator mutator;
 
     NullableVarBinaryColumn(ParquetRecordReader parentReader, int allocateSize, ColumnDescriptor descriptor,
                             ColumnChunkMetaData columnChunkMetaData, boolean fixedLength, NullableVarBinaryVector v,
                             SchemaElement schemaElement) throws ExecutionSetupException {
       super(parentReader, allocateSize, descriptor, columnChunkMetaData, fixedLength, v, schemaElement);
       nullableVarBinaryVector = v;
+      mutator = v.getMutator();
     }
+
 
     @Override
     public boolean setSafe(int index, DrillBuf value, int start, int length) {
@@ -311,28 +298,17 @@ public class VarLengthColumnReaders {
       }
 
       if (usingDictionary) {
-        DrillBuf b = DrillBuf.wrapByteBuffer(currDictValToWrite.toByteBuffer());
-        NullableVarBinaryHolder holder = new NullableVarBinaryHolder();
-        holder.buffer=b;
-        holder.start=0;
-        holder.end=currDictValToWrite.length();
-        holder.isSet=1;
-        nullableVarBinaryVector.getMutator().setSafe(index, holder);
-      }
-      else {
-        NullableVarBinaryHolder holder = new NullableVarBinaryHolder();
-        holder.buffer=value;
-        holder.start=start;
-        holder.end=start+length;
-        holder.isSet=1;
-        nullableVarBinaryVector.getMutator().setSafe(index, holder);
+        ByteBuffer buf = currDictValToWrite.toByteBuffer();
+        mutator.setSafe(index, buf, buf.position(), currDictValToWrite.length());
+      } else {
+        mutator.setSafe(index, 1, start, start + length, value);
       }
       return true;
     }
 
     @Override
     public int capacity() {
-      return nullableVarBinaryVector.getData().capacity();
+      return nullableVarBinaryVector.getBuffer().capacity();
     }
 
   }

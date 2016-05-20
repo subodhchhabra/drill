@@ -29,15 +29,41 @@ import org.junit.Test;
 
 import com.google.common.base.Function;
 
-public class TestJdbcQuery extends JdbcTestQueryBase{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestJdbcQuery.class);
+public class TestJdbcQuery extends JdbcTestQueryBase {
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TestJdbcQuery.class);
+
+  // TODO:  Purge nextUntilEnd(...) and calls when remaining fragment race
+  // conditions are fixed (not just DRILL-2245 fixes).
+  ///**
+  // * Calls {@link ResultSet#next} on given {@code ResultSet} until it returns
+  // * false.  (For TEMPORARY workaround for query cancelation race condition.)
+  // */
+  //private void nextUntilEnd(final ResultSet resultSet) throws SQLException {
+  //  while (resultSet.next()) {
+  //  }
+  //}
+
+  @Test // DRILL-3635
+  public void testFix3635() throws Exception {
+    // When we run a CTAS query, executeQuery() should return after the table has been flushed to disk even though we
+    // didn't yet receive a terminal message. To test this, we run CTAS then immediately run a query on the newly
+    // created table.
+
+    final String tableName = "dfs_test.tmp.`testDDLs`";
+
+    try (Connection conn = connect("jdbc:drill:zk=local")) {
+      Statement s = conn.createStatement();
+      s.executeQuery(String.format("CREATE TABLE %s AS SELECT * FROM cp.`employee.json`", tableName));
+    }
+
+    testQuery(String.format("SELECT * FROM %s LIMIT 1", tableName));
+  }
 
   @Test
   @Ignore
   public void testJsonQuery() throws Exception{
     testQuery("select * from cp.`employee.json`");
   }
-
 
   @Test
   public void testCast() throws Exception{
@@ -90,9 +116,9 @@ public class TestJdbcQuery extends JdbcTestQueryBase{
       .sql("SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS " +
         "WHERE TABLE_NAME NOT LIKE 'C%' AND COLUMN_NAME LIKE 'TABLE_%E'")
       .returns(
-        "TABLE_NAME=VIEWS; COLUMN_NAME=TABLE_NAME\n" +
         "TABLE_NAME=TABLES; COLUMN_NAME=TABLE_NAME\n" +
-        "TABLE_NAME=TABLES; COLUMN_NAME=TABLE_TYPE\n"
+        "TABLE_NAME=TABLES; COLUMN_NAME=TABLE_TYPE\n" +
+        "TABLE_NAME=VIEWS; COLUMN_NAME=TABLE_NAME\n"
       );
   }
 
@@ -102,8 +128,8 @@ public class TestJdbcQuery extends JdbcTestQueryBase{
       .sql("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.`TABLES` "+
         "WHERE TABLE_NAME SIMILAR TO '%(H|I)E%' AND TABLE_NAME NOT SIMILAR TO 'C%'")
       .returns(
-        "TABLE_NAME=VIEWS\n" +
-        "TABLE_NAME=SCHEMATA\n"
+        "TABLE_NAME=SCHEMATA\n" +
+        "TABLE_NAME=VIEWS\n"
       );
   }
 
@@ -187,26 +213,27 @@ public class TestJdbcQuery extends JdbcTestQueryBase{
     JdbcAssert.withNoDefaultSchema().withConnection(new Function<Connection, Void>() {
       public Void apply(Connection connection) {
         try {
-          Statement statement = connection.createStatement();
+          final Statement statement = connection.createStatement();
 
           // show tables on view
-          ResultSet resultSet = statement.executeQuery("select date '2008-2-23', time '12:23:34', timestamp '2008-2-23 12:23:34.456', " +
-                                                       "interval '1' year, interval '2' day, " +
-                                                       "date_add(date '2008-2-23', interval '1 10:20:30' day to second), " +
-                                                       "date_add(date '2010-2-23', 1) " +
-                                                       "from cp.`employee.json` limit 1");
+          final ResultSet resultSet = statement.executeQuery(
+              "select date '2008-2-23', time '12:23:34', timestamp '2008-2-23 12:23:34.456', " +
+              "interval '1' year, interval '2' day, " +
+              "date_add(date '2008-2-23', interval '1 10:20:30' day to second), " +
+              "date_add(date '2010-2-23', 1) " +
+              "from cp.`employee.json` limit 1");
 
           resultSet.next();
-          java.sql.Date date = resultSet.getDate(1);
-          java.sql.Time time = resultSet.getTime(2);
-          java.sql.Timestamp ts = resultSet.getTimestamp(3);
-          String intervalYear = resultSet.getString(4);
-          String intervalDay  = resultSet.getString(5);
-          java.sql.Timestamp ts1 = resultSet.getTimestamp(6);
-          java.sql.Date date1 = resultSet.getDate(7);
+          final java.sql.Date date = resultSet.getDate(1);
+          final java.sql.Time time = resultSet.getTime(2);
+          final java.sql.Timestamp ts = resultSet.getTimestamp(3);
+          final String intervalYear = resultSet.getString(4);
+          final String intervalDay  = resultSet.getString(5);
+          final java.sql.Timestamp ts1 = resultSet.getTimestamp(6);
+          final java.sql.Date date1 = resultSet.getDate(7);
 
-          java.sql.Timestamp result = java.sql.Timestamp.valueOf("2008-2-24 10:20:30");
-          java.sql.Date result1 = java.sql.Date.valueOf("2010-2-24");
+          final java.sql.Timestamp result = java.sql.Timestamp.valueOf("2008-2-24 10:20:30");
+          final java.sql.Date result1 = java.sql.Date.valueOf("2010-2-24");
           assertEquals(ts1, result);
           assertEquals(date1, result1);
 
@@ -214,6 +241,9 @@ public class TestJdbcQuery extends JdbcTestQueryBase{
                              "\ninterval year: " + intervalYear + " intervalDay: " + intervalDay +
                              " date_interval_add: " + ts1.toString() + "date_int_add: " + date1.toString());
 
+          // TODO:  Purge nextUntilEnd(...) and calls when remaining fragment
+          // race conditions are fixed (not just DRILL-2245 fixes).
+          // nextUntilEnd(resultSet);
           statement.close();
           return null;
         } catch (Exception e) {
@@ -228,14 +258,14 @@ public class TestJdbcQuery extends JdbcTestQueryBase{
     JdbcAssert.withNoDefaultSchema().withConnection(new Function<Connection, Void>() {
       public Void apply(Connection connection) {
         try {
-          Statement statement = connection.createStatement();
+          final Statement statement = connection.createStatement();
 
           // show files
-          ResultSet resultSet = statement.executeQuery("select timestamp '2008-2-23 12:23:23', date '2001-01-01', timestamptztype('2008-2-23 1:20:23 US/Pacific') from cp.`employee.json` limit 1");
+          final ResultSet resultSet = statement.executeQuery(
+              "select timestamp '2008-2-23 12:23:23', date '2001-01-01' from cp.`employee.json` limit 1");
 
-          assert (resultSet.getMetaData().getColumnType(1) == Types.TIMESTAMP);
-          assert (resultSet.getMetaData().getColumnType(2) == Types.DATE);
-          assert (resultSet.getMetaData().getColumnType(3) == Types.TIMESTAMP);
+          assertEquals( Types.TIMESTAMP, resultSet.getMetaData().getColumnType(1) );
+          assertEquals( Types.DATE, resultSet.getMetaData().getColumnType(2) );
 
           System.out.println(JdbcAssert.toString(resultSet));
           resultSet.close();

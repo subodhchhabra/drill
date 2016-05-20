@@ -18,44 +18,32 @@
 
 package org.apache.drill.exec.planner.sql;
 
-import com.fasterxml.jackson.databind.type.TypeFactory;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.sql.SqlCall;
-import org.eigenbase.sql.SqlCallBinding;
-import org.eigenbase.sql.SqlFunction;
-import org.eigenbase.sql.SqlFunctionCategory;
-import org.eigenbase.sql.SqlIdentifier;
-import org.eigenbase.sql.SqlOperandCountRange;
-import org.eigenbase.sql.SqlOperator;
-import org.eigenbase.sql.SqlOperatorBinding;
-import org.eigenbase.sql.parser.SqlParserPos;
-import org.eigenbase.sql.type.SqlOperandCountRanges;
-import org.eigenbase.sql.type.SqlOperandTypeChecker;
-import org.eigenbase.sql.type.SqlTypeName;
-import org.eigenbase.sql.validate.SqlValidator;
-import org.eigenbase.sql.validate.SqlValidatorScope;
+import org.apache.calcite.sql.SqlCallBinding;
+import org.apache.calcite.sql.SqlFunction;
+import org.apache.calcite.sql.SqlFunctionCategory;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlOperandCountRange;
+import org.apache.calcite.sql.SqlOperator;
+import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.SqlOperandCountRanges;
+import org.apache.calcite.sql.type.SqlOperandTypeChecker;
+import org.apache.calcite.sql.type.SqlReturnTypeInference;
 
 public class HiveUDFOperator extends SqlFunction {
-
-  public HiveUDFOperator(String name) {
-    super(new SqlIdentifier(name, SqlParserPos.ZERO), DynamicReturnType.INSTANCE, null, new ArgChecker(), null,
+  public HiveUDFOperator(String name, SqlReturnTypeInference sqlReturnTypeInference) {
+    super(new SqlIdentifier(name, SqlParserPos.ZERO), sqlReturnTypeInference, null, ArgChecker.INSTANCE, null,
         SqlFunctionCategory.USER_DEFINED_FUNCTION);
   }
 
+  // Consider Hive functions to be non-deterministic so they are not folded at
+  // planning time. The expression interpreter used to evaluate constant expressions
+  // currently does not support anything but simple DrillFuncs.
   @Override
-  public RelDataType deriveType(SqlValidator validator, SqlValidatorScope scope, SqlCall call) {
-    RelDataTypeFactory factory = validator.getTypeFactory();
-    return factory.createTypeWithNullability(factory.createSqlType(SqlTypeName.ANY), true);
+  public boolean isDeterministic() {
+    return false;
   }
 
-  @Override
-  public RelDataType inferReturnType(SqlOperatorBinding opBinding) {
-    RelDataTypeFactory factory = opBinding.getTypeFactory();
-    return factory.createTypeWithNullability(factory.createSqlType(SqlTypeName.ANY), true);
-  }
-
-    /** Argument Checker for variable number of arguments */
+  /** Argument Checker for variable number of arguments */
   public static class ArgChecker implements SqlOperandTypeChecker {
 
     public static ArgChecker INSTANCE = new ArgChecker();
@@ -68,6 +56,11 @@ public class HiveUDFOperator extends SqlFunction {
     }
 
     @Override
+    public Consistency getConsistency() {
+      return Consistency.NONE;
+    }
+
+    @Override
     public SqlOperandCountRange getOperandCountRange() {
       return range;
     }
@@ -75,6 +68,11 @@ public class HiveUDFOperator extends SqlFunction {
     @Override
     public String getAllowedSignatures(SqlOperator op, String opName) {
       return opName + "(HiveUDF - Opaque)";
+    }
+
+    @Override
+    public boolean isOptional(int arg) {
+      return false;
     }
   }
 }

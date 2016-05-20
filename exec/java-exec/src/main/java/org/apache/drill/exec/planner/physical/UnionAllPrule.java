@@ -20,20 +20,22 @@ package org.apache.drill.exec.planner.physical;
 import java.util.List;
 import java.util.logging.Logger;
 
+import org.apache.calcite.plan.RelOptRule;
+import org.apache.calcite.plan.RelOptRuleCall;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.InvalidRelException;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.util.trace.CalciteTrace;
 import org.apache.drill.exec.planner.logical.DrillUnionRel;
 import org.apache.drill.exec.planner.logical.RelOptHelper;
-import org.eigenbase.rel.InvalidRelException;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptRule;
-import org.eigenbase.relopt.RelOptRuleCall;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.trace.EigenbaseTrace;
 
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 
 public class UnionAllPrule extends Prule {
   public static final RelOptRule INSTANCE = new UnionAllPrule();
-  protected static final Logger tracer = EigenbaseTrace.getPlannerTracer();
+  protected static final Logger tracer = CalciteTrace.getPlannerTracer();
 
   private UnionAllPrule() {
     super(
@@ -60,11 +62,15 @@ public class UnionAllPrule extends Prule {
       }
 
       traits = call.getPlanner().emptyTraitSet().plus(Prel.DRILL_PHYSICAL).plus(DrillDistributionTrait.SINGLETON);
-      UnionAllPrel unionAll =
-          new UnionAllPrel(union.getCluster(), traits, convertedInputList,
-              false /* compatibility already checked during logical phase */);
 
-      call.transformTo(unionAll);
+      Preconditions.checkArgument(convertedInputList.size() >= 2, "Union list must be at least two items.");
+      RelNode left = convertedInputList.get(0);
+      for (int i = 1; i < convertedInputList.size(); i++) {
+        left = new UnionAllPrel(union.getCluster(), traits, ImmutableList.of(left, convertedInputList.get(i)),
+            false /* compatibility already checked during logical phase */);
+
+      }
+      call.transformTo(left);
 
     } catch (InvalidRelException e) {
       tracer.warning(e.toString());

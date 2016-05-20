@@ -17,7 +17,10 @@
  */
 package org.apache.drill.exec.rpc.data;
 
+import java.util.concurrent.Executor;
 
+import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.proto.BitData.BitClientHandshake;
 import org.apache.drill.exec.proto.BitData.BitServerHandshake;
 import org.apache.drill.exec.proto.BitData.FragmentRecordBatch;
@@ -30,10 +33,15 @@ import org.apache.drill.exec.rpc.RpcConfig;
 public class DataRpcConfig {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DataRpcConfig.class);
 
-  public static RpcConfig MAPPING = RpcConfig.newBuilder("BIT-DATA-RPC-MAPPING") //
-      .add(RpcType.HANDSHAKE, BitClientHandshake.class, RpcType.HANDSHAKE, BitServerHandshake.class)
-      .add(RpcType.REQ_RECORD_BATCH, FragmentRecordBatch.class, RpcType.ACK, Ack.class)
-      .build();
+  public static RpcConfig getMapping(DrillConfig config, Executor executor) {
+    return RpcConfig.newBuilder()
+        .name("DATA")
+        .executor(executor)
+        .timeout(config.getInt(ExecConstants.BIT_RPC_TIMEOUT))
+        .add(RpcType.HANDSHAKE, BitClientHandshake.class, RpcType.HANDSHAKE, BitServerHandshake.class)
+        .add(RpcType.REQ_RECORD_BATCH, FragmentRecordBatch.class, RpcType.ACK, Ack.class)
+        .build();
+  }
 
   public static int RPC_VERSION = 4;
 

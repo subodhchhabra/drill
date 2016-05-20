@@ -20,6 +20,7 @@ package org.apache.drill.exec.physical.impl.filter;
 import javax.inject.Named;
 
 import org.apache.drill.exec.exception.SchemaChangeException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
 import org.apache.drill.exec.record.RecordBatch;
@@ -63,8 +64,8 @@ public abstract class FilterTemplate2 implements Filterer{
     if (recordCount == 0) {
       return;
     }
-    if (! outgoingSelectionVector.allocateNew(recordCount)) {
-      throw new UnsupportedOperationException("Unable to allocate filter batch");
+    if (! outgoingSelectionVector.allocateNewSafe(recordCount)) {
+      throw new OutOfMemoryException("Unable to allocate filter batch");
     }
     switch(svMode){
     case NONE:

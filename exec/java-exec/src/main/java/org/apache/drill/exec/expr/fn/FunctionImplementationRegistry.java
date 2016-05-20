@@ -19,34 +19,53 @@ package org.apache.drill.exec.expr.fn;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.drill.common.config.DrillConfig;
 import org.apache.drill.common.expression.FunctionCall;
 import org.apache.drill.common.expression.fn.CastFunctions;
-import org.apache.drill.common.types.TypeProtos;
+import org.apache.drill.common.scanner.ClassPathScanner;
+import org.apache.drill.common.scanner.persistence.ScanResult;
+import org.apache.drill.common.types.TypeProtos.DataMode;
 import org.apache.drill.common.types.TypeProtos.MajorType;
-import org.apache.drill.common.util.PathScanner;
+import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.planner.sql.DrillOperatorTable;
 import org.apache.drill.exec.resolver.FunctionResolver;
-
-import com.google.common.collect.Lists;
 import org.apache.drill.exec.server.options.OptionManager;
 
-public class FunctionImplementationRegistry {
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Lists;
+
+/**
+ * This class offers the registry for functions. Notably, in addition to Drill its functions
+ * (in {@link DrillFunctionRegistry}), other PluggableFunctionRegistry (e.g., {@link org.apache.drill.exec.expr.fn.HiveFunctionRegistry})
+ * is also registered in this class
+ */
+public class FunctionImplementationRegistry implements FunctionLookupContext {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FunctionImplementationRegistry.class);
 
   private DrillFunctionRegistry drillFuncRegistry;
   private List<PluggableFunctionRegistry> pluggableFuncRegistries = Lists.newArrayList();
   private OptionManager optionManager = null;
 
+  @Deprecated @VisibleForTesting
   public FunctionImplementationRegistry(DrillConfig config){
-    drillFuncRegistry = new DrillFunctionRegistry(config);
+    this(config, ClassPathScanner.fromPrescan(config));
+  }
 
-    Set<Class<? extends PluggableFunctionRegistry>> registryClasses = PathScanner.scanForImplementations(
-        PluggableFunctionRegistry.class, config.getStringList(ExecConstants.FUNCTION_PACKAGES));
+  public FunctionImplementationRegistry(DrillConfig config, ScanResult classpathScan){
+    Stopwatch w = Stopwatch.createStarted();
+
+    logger.debug("Generating function registry.");
+    drillFuncRegistry = new DrillFunctionRegistry(classpathScan);
+
+    Set<Class<? extends PluggableFunctionRegistry>> registryClasses =
+        classpathScan.getImplementations(PluggableFunctionRegistry.class);
 
     for (Class<? extends PluggableFunctionRegistry> clazz : registryClasses) {
       for (Constructor<?> c : clazz.getConstructors()) {
@@ -67,10 +86,11 @@ public class FunctionImplementationRegistry {
         break;
       }
     }
+    logger.info("Function registry loaded.  {} functions loaded in {} ms.", drillFuncRegistry.size(), w.elapsed(TimeUnit.MILLISECONDS));
   }
 
-  public FunctionImplementationRegistry(DrillConfig config, OptionManager optionManager) {
-    this(config);
+  public FunctionImplementationRegistry(DrillConfig config, ScanResult classpathScan, OptionManager optionManager) {
+    this(config, classpathScan);
     this.optionManager = optionManager;
   }
 
@@ -95,6 +115,7 @@ public class FunctionImplementationRegistry {
    * @param functionCall
    * @return
    */
+  @Override
   public DrillFuncHolder findDrillFunction(FunctionResolver functionResolver, FunctionCall functionCall) {
     return functionResolver.getBestMatch(drillFuncRegistry.getMethods(functionReplacement(functionCall)), functionCall);
   }
@@ -102,14 +123,16 @@ public class FunctionImplementationRegistry {
   // Check if this Function Replacement is needed; if yes, return a new name. otherwise, return the original name
   private String functionReplacement(FunctionCall functionCall) {
     String funcName = functionCall.getName();
-    if (optionManager != null
-        && optionManager.getOption(ExecConstants.CAST_TO_NULLABLE_NUMERIC).bool_val
-        && CastFunctions.isReplacementNeeded(functionCall.args.get(0).getMajorType().getMinorType(),
-                                             funcName)) {
-      org.apache.drill.common.types.TypeProtos.DataMode dataMode =
-          functionCall.args.get(0).getMajorType().getMode();
-      funcName = CastFunctions.getReplacingCastFunction(funcName, dataMode);
-    }
+      if (functionCall.args.size() > 0) {
+          MajorType majorType =  functionCall.args.get(0).getMajorType();
+          DataMode dataMode = majorType.getMode();
+          MinorType minorType = majorType.getMinorType();
+          if (optionManager != null
+              && optionManager.getOption(ExecConstants.CAST_TO_NULLABLE_NUMERIC).bool_val
+              && CastFunctions.isReplacementNeeded(funcName, minorType)) {
+              funcName = CastFunctions.getReplacingCastFunction(funcName, dataMode, minorType);
+          }
+      }
 
     return funcName;
   }
@@ -141,6 +164,7 @@ public class FunctionImplementationRegistry {
    * @param functionCall
    * @return
    */
+  @Override
   public AbstractFuncHolder findNonDrillFunction(FunctionCall functionCall) {
     for(PluggableFunctionRegistry registry : pluggableFuncRegistries) {
       AbstractFuncHolder h = registry.getFunction(functionCall);

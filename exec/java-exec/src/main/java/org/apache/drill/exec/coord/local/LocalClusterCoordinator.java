@@ -21,43 +21,64 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.drill.exec.coord.ClusterCoordinator;
 import org.apache.drill.exec.coord.DistributedSemaphore;
+import org.apache.drill.exec.coord.store.CachingTransientStoreFactory;
+import org.apache.drill.exec.coord.store.TransientStore;
+import org.apache.drill.exec.coord.store.TransientStoreConfig;
+import org.apache.drill.exec.coord.store.TransientStoreFactory;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 
 import com.google.common.collect.Maps;
 
 public class LocalClusterCoordinator extends ClusterCoordinator {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(LocalClusterCoordinator.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(LocalClusterCoordinator.class);
 
-  private volatile Map<RegistrationHandle, DrillbitEndpoint> endpoints = Maps.newConcurrentMap();
-  private volatile ConcurrentMap<String, DistributedSemaphore> semaphores = Maps.newConcurrentMap();
+  /*
+   * Since we hand out the endpoints list in {@see #getAvailableEndpoints()}, we use a
+   * {@see java.util.concurrent.ConcurrentHashMap} because those guarantee not to throw
+   * ConcurrentModificationException.
+   */
+  private final Map<RegistrationHandle, DrillbitEndpoint> endpoints = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, DistributedSemaphore> semaphores = Maps.newConcurrentMap();
+
+  private final TransientStoreFactory factory = CachingTransientStoreFactory.of(new TransientStoreFactory() {
+    @Override
+    public <V> TransientStore<V> getOrCreateStore(TransientStoreConfig<V> config) {
+      return new MapBackedStore<>(config);
+    }
+
+    @Override
+    public void close() throws Exception { }
+  });
 
   @Override
-  public void close() throws IOException {
+  public void close() throws Exception {
+    factory.close();
     endpoints.clear();
   }
 
   @Override
-  public void start(long millis) throws Exception {
+  public void start(final long millis) throws Exception {
     logger.debug("Local Cluster Coordinator started.");
   }
 
   @Override
-  public RegistrationHandle register(DrillbitEndpoint data) {
+  public RegistrationHandle register(final DrillbitEndpoint data) {
     logger.debug("Endpoint registered {}.", data);
-    Handle h = new Handle();
+    final Handle h = new Handle();
     endpoints.put(h, data);
     return h;
   }
 
   @Override
-  public void unregister(RegistrationHandle handle) {
-    if(handle == null) {
+  public void unregister(final RegistrationHandle handle) {
+    if (handle == null) {
       return;
     }
 
@@ -69,8 +90,8 @@ public class LocalClusterCoordinator extends ClusterCoordinator {
     return endpoints.values();
   }
 
-  private class Handle implements RegistrationHandle{
-    UUID id = UUID.randomUUID();
+  private class Handle implements RegistrationHandle {
+    private final UUID id = UUID.randomUUID();
 
     @Override
     public int hashCode() {
@@ -82,7 +103,7 @@ public class LocalClusterCoordinator extends ClusterCoordinator {
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(final Object obj) {
       if (this == obj) {
         return true;
       }
@@ -92,7 +113,7 @@ public class LocalClusterCoordinator extends ClusterCoordinator {
       if (getClass() != obj.getClass()) {
         return false;
       }
-      Handle other = (Handle) obj;
+      final Handle other = (Handle) obj;
       if (!getOuterType().equals(other.getOuterType())) {
         return false;
       }
@@ -109,41 +130,43 @@ public class LocalClusterCoordinator extends ClusterCoordinator {
     private LocalClusterCoordinator getOuterType() {
       return LocalClusterCoordinator.this;
     }
-
   }
 
   @Override
-  public DistributedSemaphore getSemaphore(String name, int maximumLeases) {
-    semaphores.putIfAbsent(name, new LocalSemaphore(maximumLeases));
+  public DistributedSemaphore getSemaphore(final String name, final int maximumLeases) {
+    if (!semaphores.containsKey(name)) {
+      semaphores.putIfAbsent(name, new LocalSemaphore(maximumLeases));
+    }
     return semaphores.get(name);
   }
 
-  public class LocalSemaphore implements DistributedSemaphore{
+  @Override
+  public <V> TransientStore<V> getOrCreateTransientStore(final TransientStoreConfig<V> config) {
+    return factory.getOrCreateStore(config);
+  }
 
-    private final Semaphore inner;
-    private final LocalLease lease = new LocalLease();
+  public class LocalSemaphore implements DistributedSemaphore {
+    private final Semaphore semaphore;
+    private final LocalLease localLease = new LocalLease();
 
-    public LocalSemaphore(int size) {
-      inner = new Semaphore(size);
+    public LocalSemaphore(final int size) {
+      semaphore = new Semaphore(size);
     }
 
     @Override
-    public DistributedLease acquire(long timeout, TimeUnit unit) throws Exception {
-      if(!inner.tryAcquire(timeout, unit)) {
+    public DistributedLease acquire(final long timeout, final TimeUnit timeUnit) throws Exception {
+      if (!semaphore.tryAcquire(timeout, timeUnit)) {
         return null;
-      }else{
-        return lease;
+      } else {
+        return localLease;
       }
     }
 
-    private class LocalLease implements DistributedLease{
-
+    private class LocalLease implements DistributedLease {
       @Override
       public void close() throws Exception {
-        inner.release();
+        semaphore.release();
       }
-
     }
   }
-
 }

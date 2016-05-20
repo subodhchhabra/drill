@@ -19,6 +19,7 @@ package org.apache.drill.jdbc.test;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -29,13 +30,12 @@ import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 
-import net.hydromatic.linq4j.Ord;
-
+import org.apache.calcite.linq4j.Ord;
 import org.apache.drill.common.config.DrillConfig;
 import org.apache.drill.common.logical.LogicalPlan;
 import org.apache.drill.common.logical.data.LogicalOperator;
-import org.apache.drill.common.util.Hook;
 import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.planner.PhysicalPlanReaderTestFactory;
 import org.apache.drill.jdbc.ConnectionFactory;
 import org.apache.drill.jdbc.ConnectionInfo;
 import org.junit.Assert;
@@ -59,10 +59,13 @@ public class JdbcAssert {
 
   /**
    * Returns default bag of properties that is passed to JDBC connection.
-   * By default, includes an option to turn off the web server.
+   * By default, includes options to:
+   *   - turn off the web server
+   *   - indicate DrillConnectionImpl to set up dfs_test.tmp schema location to an exclusive dir just for this test jvm
    */
   public static Properties getDefaultProperties() {
     final Properties properties = new Properties();
+    properties.setProperty("drillJDBCUnitTests", "true");
     properties.setProperty(ExecConstants.HTTP_ENABLE, "false");
     return properties;
   }
@@ -85,15 +88,14 @@ public class JdbcAssert {
   }
 
   static String toString(ResultSet resultSet, int expectedRecordCount) throws SQLException {
-    StringBuilder buf = new StringBuilder();
-    int total = 0, n;
+    final StringBuilder buf = new StringBuilder();
     while (resultSet.next()) {
-      n = resultSet.getMetaData().getColumnCount();
-      total++;
+      final ResultSetMetaData metaData = resultSet.getMetaData();
+      final int n = metaData.getColumnCount();
       String sep = "";
       for (int i = 1; i <= n; i++) {
         buf.append(sep)
-            .append(resultSet.getMetaData().getColumnLabel(i))
+            .append(metaData.getColumnLabel(i))
             .append("=")
             .append(resultSet.getObject(i));
         sep = "; ";
@@ -159,8 +161,9 @@ public class JdbcAssert {
     public ModelAndSchema(final Properties info, final ConnectionFactory factory) {
       this.info = info;
       this.adapter = new ConnectionFactoryAdapter() {
+        @Override
         public Connection createConnection() throws Exception {
-          return factory.createConnection(new ConnectionInfo("jdbc:drill:zk=local", ModelAndSchema.this.info));
+          return factory.getConnection(new ConnectionInfo("jdbc:drill:zk=local", ModelAndSchema.this.info));
         }
       };
     }
@@ -304,6 +307,7 @@ public class JdbcAssert {
       Connection connection = null;
       Statement statement = null;
       final Hook.Closeable x = Hook.LOGICAL_PLAN.add(new Function<String, Void>() {
+        @Override
         public Void apply(String o) {
           plan0[0] = o;
           return null;
@@ -314,7 +318,7 @@ public class JdbcAssert {
         statement = connection.prepareStatement(sql);
         statement.close();
         final String plan = plan0[0].trim();
-        return LogicalPlan.parse(DrillConfig.create(), plan);
+        return LogicalPlan.parse(PhysicalPlanReaderTestFactory.defaultLogicalPlanPersistence(DrillConfig.create()), plan);
       } catch (Exception e) {
         throw new RuntimeException(e);
       } finally {

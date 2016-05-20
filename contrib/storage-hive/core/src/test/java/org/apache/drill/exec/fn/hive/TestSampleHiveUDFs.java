@@ -22,14 +22,15 @@ import static org.junit.Assert.assertTrue;
 import java.util.List;
 
 import org.apache.drill.exec.hive.HiveTestBase;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.junit.Ignore;
 import org.junit.Test;
 
 public class TestSampleHiveUDFs extends HiveTestBase {
 
   private void helper(String query, String expected) throws Exception {
-    List<QueryResultBatch> results = testSqlWithResults(query);
+    List<QueryDataBatch> results = testSqlWithResults(query);
     String actual = getResultString(results, ",");
     assertTrue(String.format("Result:\n%s\ndoes not match:\n%s", actual, expected), expected.equals(actual));
   }
@@ -46,6 +47,7 @@ public class TestSampleHiveUDFs extends HiveTestBase {
     helper(query, expected);
   }
 
+  @Ignore("DRILL-2470")
   @Test
   public void byteInOut() throws Exception{
     String query = "SELECT testHiveUDFByte(tinyint_field) as col1 FROM hive.readtest";
@@ -53,6 +55,7 @@ public class TestSampleHiveUDFs extends HiveTestBase {
     helper(query, expected);
   }
 
+  @Ignore("DRILL-2470")
   @Test
   public void shortInOut() throws Exception{
     String query = "SELECT testHiveUDFShort(smallint_field) as col1 FROM hive.readtest";
@@ -90,14 +93,14 @@ public class TestSampleHiveUDFs extends HiveTestBase {
   @Test
   public void stringInOut() throws Exception{
     String query = "SELECT testHiveUDFString(string_field) as col1 FROM hive.readtest";
-    String expected = "col1\n" + "stringfield\n" + "\n";
+    String expected = "col1\n" + "stringfield\n" + "null\n";
     helper(query, expected);
   }
 
   @Test
   public void binaryInOut() throws Exception{
     String query = "SELECT testHiveUDFBinary(binary_field) as col1 FROM hive.readtest";
-    String expected = "col1\n" + "binaryfield\n" + "\n";
+    String expected = "col1\n" + "binaryfield\n" + "null\n";
     helper(query, expected);    helper(query, expected);
   }
 
@@ -109,6 +112,17 @@ public class TestSampleHiveUDFs extends HiveTestBase {
         "FROM hive.kv LIMIT 1";
 
     String expected = "col1,col2\n" + "This is a varchar,null\n";
+    helper(query, expected);
+  }
+
+  @Test
+  public void varcharInCharOut() throws Exception {
+    String query = "SELECT " +
+        "testHiveUDFChar(cast ('This is a char' as char(20))) as col1," +
+        "testHiveUDFChar(cast(null as char)) as col2 " +
+        "FROM hive.kv LIMIT 1";
+
+    String expected = "col1,col2\n" + "This is a char,null\n";
     helper(query, expected);
   }
 
@@ -138,11 +152,16 @@ public class TestSampleHiveUDFs extends HiveTestBase {
 
   @Test
   public void decimalInOut() throws Exception{
-    String query = "SELECT " +
-        "testHiveUDFDecimal(cast('1234567891234567891234567891234567891.4' as decimal(38, 1))) as col1 " +
-        "FROM hive.kv LIMIT 1";
+    try {
+      test(String.format("alter session set `%s` = true", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
+      String query = "SELECT " +
+          "testHiveUDFDecimal(cast('1234567891234567891234567891234567891.4' as decimal(38, 1))) as col1 " +
+          "FROM hive.kv LIMIT 1";
 
-    String expected = "col1\n" + "1234567891234567891234567891234567891.4\n";
-    helper(query, expected);
+      String expected = "col1\n" + "1234567891234567891234567891234567891.4\n";
+      helper(query, expected);
+    } finally {
+      test(String.format("alter session set `%s` = false", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
+    }
   }
 }

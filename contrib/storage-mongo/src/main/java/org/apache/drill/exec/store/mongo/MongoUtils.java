@@ -22,65 +22,53 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 
-import org.bson.LazyBSONCallback;
-
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.mongodb.BasicDBObject;
-import com.mongodb.DBObject;
-import com.mongodb.LazyWriteableDBObject;
+import org.bson.Document;
 
 public class MongoUtils {
 
-  public static BasicDBObject andFilterAtIndex(BasicDBObject leftFilter,
-      BasicDBObject rightFilter) {
-    BasicDBObject andQueryFilter = new BasicDBObject();
-    List<BasicDBObject> filters = new ArrayList<BasicDBObject>();
+  public static Document andFilterAtIndex(Document leftFilter,
+      Document rightFilter) {
+    Document andQueryFilter = new Document();
+    List<Document> filters = new ArrayList<Document>();
     filters.add(leftFilter);
     filters.add(rightFilter);
     andQueryFilter.put("$and", filters);
     return andQueryFilter;
   }
 
-  public static BasicDBObject orFilterAtIndex(BasicDBObject leftFilter,
-      BasicDBObject rightFilter) {
-    BasicDBObject orQueryFilter = new BasicDBObject();
-    List<BasicDBObject> filters = new ArrayList<BasicDBObject>();
+  public static Document orFilterAtIndex(Document leftFilter,
+       Document rightFilter) {
+    Document orQueryFilter = new Document();
+    List<Document> filters = new ArrayList<Document>();
     filters.add(leftFilter);
     filters.add(rightFilter);
     orQueryFilter.put("$or", filters);
     return orQueryFilter;
   }
 
-  public static BasicDBObject deserializeFilter(byte[] filterBytes) {
-    DBObject dbo = new LazyWriteableDBObject(filterBytes,
-        new LazyBSONCallback());
-    BasicDBObject result = new BasicDBObject();
-    result.putAll(dbo);
-    return result;
-  }
-
-  public static Map<String, List<BasicDBObject>> mergeFilters(
+  public static Map<String, List<Document>> mergeFilters(
       Map<String, Object> minFilters, Map<String, Object> maxFilters) {
-    Map<String, List<BasicDBObject>> filters = Maps.newHashMap();
+    Map<String, List<Document>> filters = Maps.newHashMap();
 
     for (Entry<String, Object> entry : minFilters.entrySet()) {
-      List<BasicDBObject> list = filters.get(entry.getKey());
+      List<Document> list = filters.get(entry.getKey());
       if (list == null) {
         list = Lists.newArrayList();
         filters.put(entry.getKey(), list);
       }
-      list.add(new BasicDBObject(entry.getKey(), new BasicDBObject("$gte",
+      list.add(new Document(entry.getKey(), new Document("$gte",
           entry.getValue())));
     }
 
     for (Entry<String, Object> entry : maxFilters.entrySet()) {
-      List<BasicDBObject> list = filters.get(entry.getKey());
+      List<Document> list = filters.get(entry.getKey());
       if (list == null) {
         list = Lists.newArrayList();
         filters.put(entry.getKey(), list);
       }
-      list.add(new BasicDBObject(entry.getKey(), new BasicDBObject("$lt", entry
+      list.add(new Document(entry.getKey(), new Document("$lt", entry
           .getValue())));
     }
     return filters;

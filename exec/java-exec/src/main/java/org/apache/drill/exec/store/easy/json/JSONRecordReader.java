@@ -20,95 +20,169 @@ package org.apache.drill.exec.store.easy.json;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
-import org.apache.drill.common.exceptions.DrillRuntimeException;
+import com.google.common.collect.Lists;
 import org.apache.drill.common.exceptions.ExecutionSetupException;
-import org.apache.drill.common.expression.PathSegment;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.exec.ExecConstants;
-import org.apache.drill.exec.memory.OutOfMemoryException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.OperatorContext;
+import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.physical.impl.OutputMutator;
 import org.apache.drill.exec.store.AbstractRecordReader;
 import org.apache.drill.exec.store.dfs.DrillFileSystem;
+import org.apache.drill.exec.store.easy.json.JsonProcessor.ReadState;
+import org.apache.drill.exec.store.easy.json.reader.CountingJsonReader;
 import org.apache.drill.exec.vector.BaseValueVector;
 import org.apache.drill.exec.vector.complex.fn.JsonReader;
-import org.apache.drill.exec.vector.complex.fn.JsonReader.ReadState;
 import org.apache.drill.exec.vector.complex.impl.VectorContainerWriter;
-import org.apache.drill.exec.vector.complex.writer.BaseWriter;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 
 import com.fasterxml.jackson.core.JsonParseException;
-import com.google.common.base.Stopwatch;
-import org.apache.hadoop.io.compress.CompressionCodec;
-import org.apache.hadoop.io.compress.CompressionCodecFactory;
-import org.apache.hadoop.io.compress.CompressionInputStream;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 
 public class JSONRecordReader extends AbstractRecordReader {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(JSONRecordReader.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(JSONRecordReader.class);
 
-  private OutputMutator mutator;
+  public static final long DEFAULT_ROWS_PER_BATCH = BaseValueVector.INITIAL_VALUE_ALLOCATION;
+
   private VectorContainerWriter writer;
-  private Path hadoopPath;
-  private InputStream stream;
-  private DrillFileSystem fileSystem;
-  private JsonReader jsonReader;
-  private int recordCount;
-  private FragmentContext fragmentContext;
-  private OperatorContext operatorContext;
-  private List<SchemaPath> columns;
-  private boolean enableAllTextMode;
 
-  public JSONRecordReader(FragmentContext fragmentContext, String inputPath, DrillFileSystem fileSystem,
-                          List<SchemaPath> columns) throws OutOfMemoryException {
-    this.hadoopPath = new Path(inputPath);
+  // Data we're consuming
+  private Path hadoopPath;
+  private JsonNode embeddedContent;
+  private InputStream stream;
+  private final DrillFileSystem fileSystem;
+  private JsonProcessor jsonReader;
+  private int recordCount;
+  private long runningRecordCount = 0;
+  private final FragmentContext fragmentContext;
+  private final boolean enableAllTextMode;
+  private final boolean readNumbersAsDouble;
+  private final boolean unionEnabled;
+
+  /**
+   * Create a JSON Record Reader that uses a file based input stream.
+   * @param fragmentContext
+   * @param inputPath
+   * @param fileSystem
+   * @param columns  pathnames of columns/subfields to read
+   * @throws OutOfMemoryException
+   */
+  public JSONRecordReader(final FragmentContext fragmentContext, final String inputPath, final DrillFileSystem fileSystem,
+      final List<SchemaPath> columns) throws OutOfMemoryException {
+    this(fragmentContext, inputPath, null, fileSystem, columns);
+  }
+
+  /**
+   * Create a new JSON Record Reader that uses a in memory materialized JSON stream.
+   * @param fragmentContext
+   * @param embeddedContent
+   * @param fileSystem
+   * @param columns  pathnames of columns/subfields to read
+   * @throws OutOfMemoryException
+   */
+  public JSONRecordReader(final FragmentContext fragmentContext, final JsonNode embeddedContent,
+      final DrillFileSystem fileSystem, final List<SchemaPath> columns) throws OutOfMemoryException {
+    this(fragmentContext, null, embeddedContent, fileSystem, columns);
+  }
+
+  private JSONRecordReader(final FragmentContext fragmentContext, final String inputPath,
+      final JsonNode embeddedContent, final DrillFileSystem fileSystem,
+      final List<SchemaPath> columns) {
+
+    Preconditions.checkArgument(
+        (inputPath == null && embeddedContent != null) ||
+        (inputPath != null && embeddedContent == null),
+        "One of inputPath or embeddedContent must be set but not both."
+        );
+
+    if(inputPath != null) {
+      this.hadoopPath = new Path(inputPath);
+    } else {
+      this.embeddedContent = embeddedContent;
+    }
+
     this.fileSystem = fileSystem;
     this.fragmentContext = fragmentContext;
-    this.columns = columns;
-    this.enableAllTextMode = fragmentContext.getOptions().getOption(ExecConstants.JSON_ALL_TEXT_MODE).bool_val;
+
+    // only enable all text mode if we aren't using embedded content mode.
+    this.enableAllTextMode = embeddedContent == null && fragmentContext.getOptions().getOption(ExecConstants.JSON_READER_ALL_TEXT_MODE_VALIDATOR);
+    this.readNumbersAsDouble = embeddedContent == null && fragmentContext.getOptions().getOption(ExecConstants.JSON_READ_NUMBERS_AS_DOUBLE_VALIDATOR);
+    this.unionEnabled = embeddedContent == null && fragmentContext.getOptions().getOption(ExecConstants.ENABLE_UNION_TYPE);
+    setColumns(columns);
   }
 
   @Override
-  public void setup(OutputMutator output) throws ExecutionSetupException {
+  public String toString() {
+    return super.toString()
+        + "[hadoopPath = " + hadoopPath
+        + ", recordCount = " + recordCount
+        + ", runningRecordCount = " + runningRecordCount + ", ...]";
+  }
+
+  @Override
+  public void setup(final OperatorContext context, final OutputMutator output) throws ExecutionSetupException {
     try{
-      CompressionCodecFactory factory = new CompressionCodecFactory(new Configuration());
-      CompressionCodec codec = factory.getCodec(hadoopPath); // infers from file ext.
-      if (codec != null) {
-        this.stream = codec.createInputStream(fileSystem.open(hadoopPath));
-      } else {
-        this.stream = fileSystem.open(hadoopPath);
+      if (hadoopPath != null) {
+        this.stream = fileSystem.openPossiblyCompressedStream(hadoopPath);
       }
-      this.writer = new VectorContainerWriter(output);
-      this.mutator = output;
-      this.jsonReader = new JsonReader(fragmentContext.getManagedBuffer(), columns, enableAllTextMode);
-      this.jsonReader.setSource(stream);
-    }catch(Exception e){
-      handleAndRaise("Failure reading JSON file.", e);
+
+      this.writer = new VectorContainerWriter(output, unionEnabled);
+      if (isSkipQuery()) {
+        this.jsonReader = new CountingJsonReader(fragmentContext.getManagedBuffer());
+      } else {
+        this.jsonReader = new JsonReader(fragmentContext.getManagedBuffer(), ImmutableList.copyOf(getColumns()), enableAllTextMode, true, readNumbersAsDouble);
+      }
+      setupParser();
+    }catch(final Exception e){
+      handleAndRaise("Failure reading JSON file", e);
     }
   }
 
-  protected void handleAndRaise(String msg, Exception e) {
-    StringBuilder sb = new StringBuilder();
-    sb.append(msg).append(" - Parser was at record: ").append(recordCount+1);
+  protected List<SchemaPath> getDefaultColumnsToRead() {
+    return ImmutableList.of();
+  }
+
+  private void setupParser() throws IOException {
+    if(hadoopPath != null){
+      jsonReader.setSource(stream);
+    }else{
+      jsonReader.setSource(embeddedContent);
+    }
+  }
+
+  protected void handleAndRaise(String suffix, Exception e) throws UserException {
+
+    String message = e.getMessage();
+    int columnNr = -1;
+
     if (e instanceof JsonParseException) {
-      JsonParseException ex = JsonParseException.class.cast(e);
-      sb.append(" column: ").append(ex.getLocation().getColumnNr());
+      final JsonParseException ex = (JsonParseException) e;
+      message = ex.getOriginalMessage();
+      columnNr = ex.getLocation().getColumnNr();
     }
-    throw new DrillRuntimeException(sb.toString(), e);
+
+    UserException.Builder exceptionBuilder = UserException.dataReadError(e)
+            .message("%s - %s", suffix, message);
+    if (columnNr > 0) {
+      exceptionBuilder.pushContext("Column ", columnNr);
+    }
+
+    if (hadoopPath != null) {
+      exceptionBuilder.pushContext("Record ", currentRecordNumberInFile())
+          .pushContext("File ", hadoopPath.toUri().getPath());
+    }
+
+    throw exceptionBuilder.build(logger);
   }
 
-
-  public OperatorContext getOperatorContext() {
-    return operatorContext;
-  }
-
-  public void setOperatorContext(OperatorContext operatorContext) {
-    this.operatorContext = operatorContext;
+  private long currentRecordNumberInFile() {
+    return runningRecordCount + recordCount + 1;
   }
 
   @Override
@@ -120,11 +194,11 @@ public class JSONRecordReader extends AbstractRecordReader {
     ReadState write = null;
 //    Stopwatch p = new Stopwatch().start();
     try{
-      outside: while(recordCount < BaseValueVector.INITIAL_VALUE_ALLOCATION){
+      outside: while(recordCount < DEFAULT_ROWS_PER_BATCH) {
         writer.setPosition(recordCount);
         write = jsonReader.write(writer);
 
-        if(write == ReadState.WRITE_SUCCEED){
+        if(write == ReadState.WRITE_SUCCEED) {
 //          logger.debug("Wrote record.");
           recordCount++;
         }else{
@@ -139,28 +213,25 @@ public class JSONRecordReader extends AbstractRecordReader {
       writer.setValueCount(recordCount);
 //      p.stop();
 //      System.out.println(String.format("Wrote %d records in %dms.", recordCount, p.elapsed(TimeUnit.MILLISECONDS)));
-      if (recordCount == 0 && write == ReadState.WRITE_FAILURE) {
-        throw new IOException("Record was too large to copy into vector.");
-      }
 
+      updateRunningCount();
       return recordCount;
 
-    } catch (JsonParseException e) {
-      handleAndRaise("Error parsing JSON.", e);
-    } catch (IOException e) {
-      handleAndRaise("Error reading JSON.", e);
+    } catch (final Exception e) {
+      handleAndRaise("Error parsing JSON", e);
     }
     // this is never reached
     return 0;
   }
 
-  @Override
-  public void cleanup() {
-    try {
-      stream.close();
-    } catch (IOException e) {
-      logger.warn("Failure while closing stream.", e);
-    }
+  private void updateRunningCount() {
+    runningRecordCount += recordCount;
   }
 
+  @Override
+  public void close() throws Exception {
+    if(stream != null) {
+      stream.close();
+    }
+  }
 }

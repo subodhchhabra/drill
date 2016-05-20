@@ -22,6 +22,7 @@ import java.io.File;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.scanner.ClassPathScanner;
 import org.apache.drill.exec.expr.fn.FunctionImplementationRegistry;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.physical.PhysicalPlan;
@@ -45,7 +46,7 @@ public class RunRootExec {
   public static void main(String args[]) throws Exception {
     String path = args[0];
     int iterations = Integer.parseInt(args[1]);
-    Drillbit bit = new Drillbit(c, RemoteServiceSet.getLocalServiceSet());
+    Drillbit bit = new Drillbit(c, RemoteServiceSet.getLocalServiceSet(), ClassPathScanner.fromPrescan(c));
     bit.run();
     DrillbitContext bitContext = bit.getContext();
     PhysicalPlanReader reader = bitContext.getPlanReader();
@@ -54,7 +55,7 @@ public class RunRootExec {
     FragmentContext context = new FragmentContext(bitContext, PlanFragment.getDefaultInstance(), null, registry);
     SimpleRootExec exec;
     for (int i = 0; i < iterations; i ++) {
-      Stopwatch w= new Stopwatch().start();
+      Stopwatch w = Stopwatch.createStarted();
       System.out.println("STARTITER:" + i);
       exec = new SimpleRootExec(ImplCreator.getExec(context, (FragmentRoot) plan.getSortedOperators(false).iterator().next()));
 
@@ -65,7 +66,7 @@ public class RunRootExec {
       }
       System.out.println("ENDITER: " + i);
       System.out.println("TIME: " + w.elapsed(TimeUnit.MILLISECONDS) + "ms");
-      exec.stop();
+      exec.close();
     }
     context.close();
     bit.close();

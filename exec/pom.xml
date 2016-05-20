@@ -20,7 +20,7 @@
   <parent>
     <artifactId>drill-root</artifactId>
     <groupId>org.apache.drill</groupId>
-    <version>0.8.0-SNAPSHOT</version>
+    <version>1.7.0-SNAPSHOT</version>
   </parent>
 
   <groupId>org.apache.drill.exec</groupId>
@@ -41,21 +41,13 @@
         <module>jdbc-all</module>
       </modules>
     </profile>
-    <profile>
-      <id>build-interpreter</id>
-      <activation>
-        <property>
-          <name>!skipInterpreter</name>
-        </property>
-      </activation>
-      <modules>
-        <module>interpreter</module>
-      </modules>
-    </profile>
   </profiles>
 
 
   <modules>
+    <module>memory</module>
+    <module>rpc</module>
+    <module>vector</module>
     <module>java-exec</module>
     <module>jdbc</module>
   </modules>

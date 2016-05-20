@@ -26,13 +26,14 @@ import org.apache.drill.exec.planner.common.DrillWriterRelBase;
 import org.apache.drill.exec.planner.logical.CreateTableEntry;
 import org.apache.drill.exec.planner.physical.visitor.PrelVisitor;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelTraitSet;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelTraitSet;
 
 public class WriterPrel extends DrillWriterRelBase implements Prel {
 
-
+  public static final String PARTITION_COMPARATOR_FIELD = "P_A_R_T_I_T_I_O_N_C_O_M_P_A_R_A_T_O_R";
+  public static final String PARTITION_COMPARATOR_FUNC = "newPartitionValue";
 
   public WriterPrel(RelOptCluster cluster, RelTraitSet traits, RelNode child, CreateTableEntry createTableEntry) {
     super(Prel.DRILL_PHYSICAL, cluster, traits, child, createTableEntry);
@@ -46,7 +47,7 @@ public class WriterPrel extends DrillWriterRelBase implements Prel {
 
   @Override
   public PhysicalOperator getPhysicalOperator(PhysicalPlanCreator creator) throws IOException {
-    Prel child = (Prel) this.getChild();
+    Prel child = (Prel) this.getInput();
     PhysicalOperator g = getCreateTableEntry().getWriter(child.getPhysicalOperator(creator));
     return creator.addMetadata(this, g);
   }
@@ -54,7 +55,7 @@ public class WriterPrel extends DrillWriterRelBase implements Prel {
 
   @Override
   public Iterator<Prel> iterator() {
-    return PrelUtil.iter(getChild());
+    return PrelUtil.iter(getInput());
   }
 
   @Override

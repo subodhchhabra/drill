@@ -28,16 +28,17 @@ import org.apache.drill.exec.physical.base.GroupScan;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.physical.base.ScanStats;
 import org.apache.drill.exec.planner.cost.DrillCostBase.DrillCostFactory;
+import org.apache.drill.exec.planner.fragment.DistributionAffinity;
 import org.apache.drill.exec.planner.physical.visitor.PrelVisitor;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
-import org.eigenbase.rel.AbstractRelNode;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.rel.RelWriter;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelOptCost;
-import org.eigenbase.relopt.RelOptPlanner;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.reltype.RelDataType;
+import org.apache.calcite.rel.AbstractRelNode;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.RelWriter;
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptCost;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.type.RelDataType;
 
 public class ScanPrel extends AbstractRelNode implements DrillScanPrel {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory
@@ -101,13 +102,15 @@ public class ScanPrel extends AbstractRelNode implements DrillScanPrel {
 
   @Override
   public double getRows() {
-    return this.groupScan.getScanStats().getRecordCount();
+    final PlannerSettings settings = PrelUtil.getPlannerSettings(getCluster());
+    return this.groupScan.getScanStats(settings).getRecordCount();
   }
 
   @Override
-  public RelOptCost computeSelfCost(RelOptPlanner planner) {
-    ScanStats stats = this.groupScan.getScanStats();
-    int columnCount = this.getRowType().getFieldCount();
+  public RelOptCost computeSelfCost(final RelOptPlanner planner) {
+    final PlannerSettings settings = PrelUtil.getPlannerSettings(planner);
+    final ScanStats stats = this.groupScan.getScanStats(settings);
+    final int columnCount = this.getRowType().getFieldCount();
 
     if(PrelUtil.getSettings(getCluster()).useDefaultCosting()) {
       return planner.getCostFactory().makeCost(stats.getRecordCount() * columnCount, stats.getCpuCost(), stats.getDiskCost());
@@ -116,7 +119,15 @@ public class ScanPrel extends AbstractRelNode implements DrillScanPrel {
     // double rowCount = RelMetadataQuery.getRowCount(this);
     double rowCount = stats.getRecordCount();
 
-    double cpuCost = rowCount * columnCount; // for now, assume cpu cost is proportional to row count.
+    // As DRILL-4083 points out, when columnCount == 0, cpuCost becomes zero,
+    // which makes the costs of HiveScan and HiveDrillNativeParquetScan the same
+    double cpuCost = rowCount * Math.max(columnCount, 1); // For now, assume cpu cost is proportional to row count.
+
+    // If a positive value for CPU cost is given multiply the default CPU cost by given CPU cost.
+    if (stats.getCpuCost() > 0) {
+      cpuCost *= stats.getCpuCost();
+    }
+
     // Even though scan is reading from disk, in the currently generated plans all plans will
     // need to read the same amount of data, so keeping the disk io cost 0 is ok for now.
     // In the future we might consider alternative scans that go against projections or
@@ -150,5 +161,10 @@ public class ScanPrel extends AbstractRelNode implements DrillScanPrel {
   @Override
   public boolean needsFinalColumnReordering() {
     return true;
+  }
+
+  @Override
+  public DistributionAffinity getDistributionAffinity() {
+    return groupScan.getDistributionAffinity();
   }
 }

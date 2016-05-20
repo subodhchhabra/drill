@@ -23,18 +23,20 @@ import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.proto.UserBitShared.MinorFragmentProfile;
 
-import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.Lists;
 
+/**
+ * Holds statistics of a particular (minor) fragment.
+ */
 public class FragmentStats {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FragmentStats.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FragmentStats.class);
 
   private List<OperatorStats> operators = Lists.newArrayList();
   private final long startTime;
   private final DrillbitEndpoint endpoint;
   private final BufferAllocator allocator;
 
-  public FragmentStats(BufferAllocator allocator, MetricRegistry metrics, DrillbitEndpoint endpoint) {
+  public FragmentStats(BufferAllocator allocator, DrillbitEndpoint endpoint) {
     this.startTime = System.currentTimeMillis();
     this.endpoint = endpoint;
     this.allocator = allocator;
@@ -50,9 +52,16 @@ public class FragmentStats {
     }
   }
 
-  public OperatorStats getOperatorStats(OpProfileDef profileDef, BufferAllocator allocator){
-    OperatorStats stats = new OperatorStats(profileDef, allocator);
-    if(profileDef.operatorType != -1){
+  /**
+   * Creates a new holder for operator statistics within this holder for fragment statistics.
+   *
+   * @param profileDef operator profile definition
+   * @param allocator the allocator being used
+   * @return a new operator statistics holder
+   */
+  public OperatorStats newOperatorStats(final OpProfileDef profileDef, final BufferAllocator allocator) {
+    final OperatorStats stats = new OperatorStats(profileDef, allocator);
+    if(profileDef.operatorType != -1) {
       operators.add(stats);
     }
     return stats;

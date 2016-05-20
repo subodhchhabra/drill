@@ -15,15 +15,13 @@
  See the License for the specific language governing permissions and
  limitations under the License.
 -->
-<project
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
-  xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
     <groupId>org.apache.drill.contrib.storage-hive</groupId>
     <artifactId>drill-contrib-storage-hive-parent</artifactId>
-    <version>0.8.0-SNAPSHOT</version>
+    <version>1.7.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>drill-storage-hive-core</artifactId>
@@ -53,8 +51,20 @@
       </exclusions>
     </dependency>
     <dependency>
-      <groupId>net.hydromatic</groupId>
-      <artifactId>optiq-core</artifactId>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-metastore</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-hbase-handler</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hive</groupId>
+      <artifactId>hive-contrib</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.calcite</groupId>
+      <artifactId>calcite-core</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.drill</groupId>
@@ -70,73 +80,45 @@
       <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-yarn-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-common</artifactId>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-hdfs</artifactId>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
     <plugins>
       <plugin>
-        <groupId>com.googlecode.fmpp-maven-plugin</groupId>
-        <artifactId>fmpp-maven-plugin</artifactId>
-        <version>1.0</version>
-        <dependencies>
-          <dependency>
-            <groupId>org.freemarker</groupId>
-            <artifactId>freemarker</artifactId>
-            <version>2.3.19</version>
-          </dependency>
-        </dependencies>
-        <configuration>
-          <cfgFile>src/main/codegen/config.fmpp</cfgFile>
-          <outputDirectory>target/generated-sources</outputDirectory>
-          <templateDirectory>src/main/codegen/templates</templateDirectory>
-        </configuration>
+        <groupId>org.apache.drill.tools</groupId>
+        <artifactId>drill-fmpp-maven-plugin</artifactId>
+        <version>${project.version}</version>
         <executions>
           <execution>
             <id>generate-fmpp-sources</id>
-            <phase>initialize</phase>
+            <phase>generate-sources</phase>
             <goals>
               <goal>generate</goal>
             </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.codehaus.mojo</groupId>
-        <artifactId>build-helper-maven-plugin</artifactId>
-        <version>1.5</version>
-        <executions>
-          <execution>
-            <id>add-fmpp-sources</id>
-            <phase>validate</phase>
-            <goals>
-              <goal>add-source</goal>
-            </goals>
             <configuration>
-              <sources>
-                <source>${project.build.directory}/generated-sources</source>
-              </sources>
+              <config>src/main/codegen/config.fmpp</config>
+              <output>${project.build.directory}/generated-sources</output>
+              <templates>src/main/codegen/templates</templates>
             </configuration>
           </execution>
         </executions>
-      </plugin>
-      <plugin>
-        <artifactId>maven-jar-plugin</artifactId>
-        <executions>
-          <execution>
-            <id>test-jar</id>
-            <goals>
-              <goal>test-jar</goal>
-            </goals>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-            <forkCount>1</forkCount>
-            <reuseForks>false</reuseForks>
-        </configuration>
       </plugin>
     </plugins>
   </build>

@@ -19,11 +19,12 @@ package org.apache.drill.exec.store.parquet2;
 
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.exec.physical.impl.OutputMutator;
+import org.apache.drill.exec.server.options.OptionManager;
 import org.apache.drill.exec.vector.complex.writer.BaseWriter.ComplexWriter;
 
-import parquet.io.api.GroupConverter;
-import parquet.io.api.RecordMaterializer;
-import parquet.schema.MessageType;
+import org.apache.parquet.io.api.GroupConverter;
+import org.apache.parquet.io.api.RecordMaterializer;
+import org.apache.parquet.schema.MessageType;
 
 import java.util.Collection;
 import java.util.List;
@@ -33,17 +34,14 @@ public class DrillParquetRecordMaterializer extends RecordMaterializer<Void> {
   public DrillParquetGroupConverter root;
   private ComplexWriter complexWriter;
 
-  public DrillParquetRecordMaterializer(OutputMutator mutator, ComplexWriter complexWriter, MessageType schema, Collection<SchemaPath> columns) {
+  public DrillParquetRecordMaterializer(OutputMutator mutator, ComplexWriter complexWriter, MessageType schema,
+                                        Collection<SchemaPath> columns, OptionManager options) {
     this.complexWriter = complexWriter;
-    root = new DrillParquetGroupConverter(mutator, complexWriter.rootAsMap(), schema, columns);
+    root = new DrillParquetGroupConverter(mutator, complexWriter.rootAsMap(), schema, columns, options);
   }
 
   public void setPosition(int position) {
     complexWriter.setPosition(position);
-  }
-
-  public boolean ok() {
-    return complexWriter.ok();
   }
 
   @Override

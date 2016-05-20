@@ -17,19 +17,19 @@
  */
 package org.apache.drill.exec.store.parquet.columnreaders;
 
-import io.netty.buffer.ByteBuf;
+import io.netty.buffer.DrillBuf;
 
 import java.io.IOException;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
-import org.apache.drill.exec.vector.BaseValueVector;
+import org.apache.drill.exec.vector.BaseDataValueVector;
 import org.apache.drill.exec.vector.ValueVector;
 
-import parquet.column.ColumnDescriptor;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
-import parquet.schema.PrimitiveType;
-import parquet.schema.PrimitiveType.PrimitiveTypeName;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
 
 public abstract class ColumnReader<V extends ValueVector> {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ColumnReader.class);
@@ -67,7 +67,7 @@ public abstract class ColumnReader<V extends ValueVector> {
   int dataTypeLengthInBits;
   int bytesReadInCurrentPass;
 
-  protected ByteBuf vectorData;
+  protected DrillBuf vectorData;
   // when reading definition levels for nullable columns, it is a one-way stream of integers
   // when reading var length data, where we don't know if all of the records will fit until we've read all of them
   // we must store the last definition level an use it in at the start of the next batch
@@ -106,14 +106,14 @@ public abstract class ColumnReader<V extends ValueVector> {
       do {
         determineSize(recordsToReadInThisPass, 0);
 
-      } while (valuesReadInCurrentPass < recordsToReadInThisPass && pageReader.currentPage != null);
+      } while (valuesReadInCurrentPass < recordsToReadInThisPass && pageReader.hasPage());
     }
     valueVec.getMutator().setValueCount(valuesReadInCurrentPass);
   }
 
   public void clear() {
     valueVec.clear();
-    this.pageReader.clear();
+    pageReader.clear();
   }
 
   public void readValues(long recordsToRead) {
@@ -180,7 +180,7 @@ public abstract class ColumnReader<V extends ValueVector> {
     readLengthInBits = 0;
     recordsReadInThisIteration = 0;
     bytesReadInCurrentPass = 0;
-    vectorData = ((BaseValueVector) valueVec).getData();
+    vectorData = ((BaseDataValueVector) valueVec).getBuffer();
   }
 
   public int capacity() {
@@ -189,11 +189,11 @@ public abstract class ColumnReader<V extends ValueVector> {
 
   // Read a page if we need more data, returns true if we need to exit the read loop
   public boolean readPage() throws IOException {
-    if (pageReader.currentPage == null
-        || totalValuesReadAndReadyToReadInPage() == pageReader.currentPage.getValueCount()) {
+    if (!pageReader.hasPage()
+        || totalValuesReadAndReadyToReadInPage() == pageReader.currentPageCount) {
       readRecords(pageReader.valuesReadyToRead);
-      if (pageReader.currentPage != null) {
-        totalValuesRead += pageReader.currentPage.getValueCount();
+      if (pageReader.hasPage()) {
+        totalValuesRead += pageReader.currentPageCount;
       }
       if (!pageReader.next()) {
         hitRowGroupEnd();
@@ -223,6 +223,15 @@ public abstract class ColumnReader<V extends ValueVector> {
       return true;
     }
     return false;
+  }
+
+  // copied out of parquet library, didn't want to deal with the uneeded throws statement they had declared
+  public static int readIntLittleEndian(DrillBuf in, int offset) {
+    int ch4 = in.getByte(offset) & 0xff;
+    int ch3 = in.getByte(offset + 1) & 0xff;
+    int ch2 = in.getByte(offset + 2) & 0xff;
+    int ch1 = in.getByte(offset + 3) & 0xff;
+    return ((ch1 << 24) + (ch2 << 16) + (ch3 << 8) + (ch4 << 0));
   }
 
 }

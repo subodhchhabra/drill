@@ -24,6 +24,10 @@ import java.lang.Override;
 <#list ["", "Nullable"] as mode>
 <#assign name = mode + minor.class?cap_first />
 <#assign javaType = (minor.javaType!type.javaType) />
+<#assign friendlyType = (minor.friendlyType!minor.boxedType!type.boxedType) />
+<#-- Class returned by ResultSet.getObject(...): -->
+<#assign jdbcObjectClass = minor.jdbcObjectClass ! friendlyType />
+
 <@pp.changeOutputFile name="/org/apache/drill/exec/vector/accessor/${name}Accessor.java" />
 <#include "/@includes/license.ftl" />
 
@@ -32,159 +36,311 @@ package org.apache.drill.exec.vector.accessor;
 <#include "/@includes/vv_imports.ftl" />
 
 @SuppressWarnings("unused")
-public class ${name}Accessor extends AbstractSqlAccessor{
-  <#if mode == "Nullable">
+public class ${name}Accessor extends AbstractSqlAccessor {
+ <#if mode == "Nullable">
   private static final MajorType TYPE = Types.optional(MinorType.${minor.class?upper_case});
-  <#else>
+ <#else>
   private static final MajorType TYPE = Types.required(MinorType.${minor.class?upper_case});
-  </#if>
-  
+ </#if>
+
   private final ${name}Vector.Accessor ac;
-  
-  public ${name}Accessor(${name}Vector vector){
+
+  public ${name}Accessor(${name}Vector vector) {
     this.ac = vector.getAccessor();
   }
 
-  <#if minor.class != "TimeStampTZ" && minor.class != "TimeStamp" && minor.class != "Time" && minor.class != "Date">
-  public Object getObject(int index){
+  @Override
+  public MajorType getType() {
+    return TYPE;
+  };
+
+  @Override
+  public boolean isNull(int index) {
+   <#if mode == "Nullable">
+    return ac.isNull(index);
+   <#else>
+    return false;
+   </#if>
+  }
+
+ <#if minor.class != "VarChar" && minor.class != "TimeStamp"
+   && minor.class != "Time" && minor.class != "Date">
+  <#-- Types whose class for JDBC getObject(...) is same as class from getObject
+       on vector. -->
+
+  @Override
+  public Class<?> getObjectClass() {
+    return ${jdbcObjectClass}.class;
+  }
+
+  @Override
+  public Object getObject(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     return ac.getObject(index);
   }
-  </#if>
-  
-  <#if type.major == "VarLen">
+ </#if>
 
-  @Override 
-  public InputStream getStream(int index){
+ <#if type.major == "VarLen">
+
+  @Override
+  public InputStream getStream(int index) {
+    <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     ${name}Holder h = new ${name}Holder();
     ac.get(index, h);
     return new ByteBufInputStream(h.buffer.slice(h.start, h.end));
   }
-  
-  @Override 
-  public byte[] getBytes(int index){
+
+  @Override
+  public byte[] getBytes(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     return ac.get(index);
   }
-  
+
   <#switch minor.class>
+
     <#case "VarBinary">
+
+    @Override
     public String getString(int index) {
+     <#if mode == "Nullable">
+      if (ac.isNull(index)) {
+        return null;
+      }
+     </#if>
       byte [] b = ac.get(index);
       return DrillStringUtils.toBinaryString(b);
     }
       <#break>
+
     <#case "VarChar">
-    @Override 
-    public InputStreamReader getReader(int index){
+
+    @Override
+    public Class<?> getObjectClass() {
+      return String.class;
+    }
+
+    @Override
+    public String getObject(int index) {
+     <#if mode == "Nullable">
+       if (ac.isNull(index)) {
+         return null;
+       }
+     </#if>
+       return getString(index);
+    }
+
+    @Override
+    public InputStreamReader getReader(int index) {
+     <#if mode == "Nullable">
+      if (ac.isNull(index)) {
+        return null;
+      }
+     </#if>
       return new InputStreamReader(getStream(index), Charsets.UTF_8);
     }
-    
-    @Override 
-    public String getString(int index){
+
+    @Override
+    public String getString(int index) {
+     <#if mode == "Nullable">
+      if (ac.isNull(index)) {
+        return null;
+      }
+     </#if>
       return new String(getBytes(index), Charsets.UTF_8);
     }
-    
-    
       <#break>
+
     <#case "Var16Char">
-    @Override 
-    public InputStreamReader getReader(int index){
+
+    @Override
+    public InputStreamReader getReader(int index) {
+     <#if mode == "Nullable">
+      if (ac.isNull(index)) {
+        return null;
+      }
+     </#if>
       return new InputStreamReader(getStream(index), Charsets.UTF_16);
     }
-    
-    @Override 
-    public String getString(int index){
+
+    @Override
+    public String getString(int index) {
+     <#if mode == "Nullable">
+      if (ac.isNull(index)) {
+        return null;
+      }
+     </#if>
       return new String(getBytes(index), Charsets.UTF_16);
     }
-        
-    
       <#break>
-    <#default> 
+
+    <#default>
     This is uncompilable code
+
   </#switch>
 
-  <#else>
+ <#else> <#-- VarLen -->
+
   <#if minor.class == "TimeStampTZ">
+
+  @Override
+  public Class<?> getObjectClass() {
+    return Timestamp.class;
+  }
+
+  @Override
   public Object getObject(int index) {
     return getTimestamp(index);
   }
 
   @Override
   public Timestamp getTimestamp(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     return new Timestamp(ac.getObject(index).getMillis());
   }
+
   <#elseif minor.class == "Interval" || minor.class == "IntervalDay" || minor.class == "IntervalYear">
+
   @Override
   public String getString(int index) {
-      return String.valueOf(ac.getAsStringBuilder(index));
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
+    return String.valueOf(ac.getAsStringBuilder(index));
   }
+
   <#elseif minor.class.startsWith("Decimal")>
+
   @Override
   public BigDecimal getBigDecimal(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
       return ac.getObject(index);
   }
   <#elseif minor.class == "Date">
+
+  @Override
+  public Class<?> getObjectClass() {
+    return Date.class;
+  }
+
+  @Override
   public Object getObject(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     return getDate(index);
   }
 
   @Override
   public Date getDate(int index) {
-    <#if mode == "Nullable">
+   <#if mode == "Nullable">
     if (ac.isNull(index)) {
       return null;
     }
-    </#if>
+   </#if>
     org.joda.time.DateTime date = new org.joda.time.DateTime(ac.get(index), org.joda.time.DateTimeZone.UTC);
     date = date.withZoneRetainFields(org.joda.time.DateTimeZone.getDefault());
     return new Date(date.getMillis());
   }
+
   <#elseif minor.class == "TimeStamp">
+
+  @Override
+  public Class<?> getObjectClass() {
+    return Timestamp.class;
+  }
+
+  @Override
   public Object getObject(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return null;
+    }
+   </#if>
     return getTimestamp(index);
   }
 
   @Override
   public Timestamp getTimestamp(int index) {
-    <#if mode == "Nullable">
+   <#if mode == "Nullable">
     if (ac.isNull(index)) {
       return null;
     }
-    </#if>
+   </#if>
     org.joda.time.DateTime date = new org.joda.time.DateTime(ac.get(index), org.joda.time.DateTimeZone.UTC);
     date = date.withZoneRetainFields(org.joda.time.DateTimeZone.getDefault());
     return new Timestamp(date.getMillis());
   }
+
   <#elseif minor.class == "Time">
+
+  @Override
+  public Class<?> getObjectClass() {
+    return Time.class;
+  }
+
+  @Override
   public Object getObject(int index) {
     return getTime(index);
   }
 
   @Override
   public Time getTime(int index) {
-    <#if mode == "Nullable">
+   <#if mode == "Nullable">
     if (ac.isNull(index)) {
       return null;
     }
-    </#if>
+   </#if>
     org.joda.time.DateTime time = new org.joda.time.DateTime(ac.get(index), org.joda.time.DateTimeZone.UTC);
     time = time.withZoneRetainFields(org.joda.time.DateTimeZone.getDefault());
     return new TimePrintMillis(time.getMillis());
   }
+
   <#else>
+
   @Override
-  public ${javaType} get${javaType?cap_first}(int index){
+  public ${javaType} get${javaType?cap_first}(int index) {
     return ac.get(index);
   }
   </#if>
-  </#if>
-  
-  @Override
-  public boolean isNull(int index){
-    return false;
+
+
+  <#if minor.class == "Bit" >
+  public boolean getBoolean(int index) {
+   <#if mode == "Nullable">
+    if (ac.isNull(index)) {
+      return false;
+    }
+   </#if>
+   return 1 == ac.get(index);
   }
-  
-  @Override
-  MajorType getType(){return TYPE;};
+ </#if>
+
+
+ </#if> <#-- not VarLen -->
 
 }
 

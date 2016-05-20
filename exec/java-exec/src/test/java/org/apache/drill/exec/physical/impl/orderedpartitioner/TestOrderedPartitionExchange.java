@@ -26,11 +26,12 @@ import org.apache.commons.math.stat.descriptive.moment.StandardDeviation;
 import org.apache.drill.common.config.DrillConfig;
 import org.apache.drill.common.expression.ExpressionPosition;
 import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.common.scanner.ClassPathScanner;
 import org.apache.drill.common.util.FileUtils;
 import org.apache.drill.exec.client.DrillClient;
 import org.apache.drill.exec.pop.PopUnitTestBase;
 import org.apache.drill.exec.record.RecordBatchLoader;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
+import org.apache.drill.exec.rpc.user.QueryDataBatch;
 import org.apache.drill.exec.server.BootStrapContext;
 import org.apache.drill.exec.server.Drillbit;
 import org.apache.drill.exec.server.RemoteServiceSet;
@@ -71,16 +72,17 @@ public class TestOrderedPartitionExchange extends PopUnitTestBase {
       bit1.run();
       bit2.run();
       client.connect();
-      List<QueryResultBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
+      List<QueryDataBatch> results = client.runQuery(org.apache.drill.exec.proto.UserBitShared.QueryType.PHYSICAL,
           Files.toString(FileUtils.getResourceAsFile("/sender/ordered_exchange.json"),
               Charsets.UTF_8));
       int count = 0;
       List<Integer> partitionRecordCounts = Lists.newArrayList();
-      for(QueryResultBatch b : results) {
+      for(QueryDataBatch b : results) {
         if (b.getData() != null) {
           int rows = b.getHeader().getRowCount();
           count += rows;
-          RecordBatchLoader loader = new RecordBatchLoader(new BootStrapContext(DrillConfig.create()).getAllocator());
+          DrillConfig config = DrillConfig.create();
+          RecordBatchLoader loader = new RecordBatchLoader(new BootStrapContext(config, ClassPathScanner.fromPrescan(config)).getAllocator());
           loader.load(b.getHeader().getDef(), b.getData());
           BigIntVector vv1 = (BigIntVector)loader.getValueAccessorById(BigIntVector.class, loader.getValueVectorId(
                   new SchemaPath("col1", ExpressionPosition.UNKNOWN)).getFieldIds()).getValueVector();

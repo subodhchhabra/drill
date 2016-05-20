@@ -18,7 +18,6 @@
 package org.apache.drill.common.types;
 
 import static org.apache.drill.common.types.TypeProtos.DataMode.REPEATED;
-import static org.apache.drill.common.types.TypeProtos.MinorType.*;
 
 import org.apache.drill.common.exceptions.DrillRuntimeException;
 import org.apache.drill.common.types.TypeProtos.DataMode;
@@ -35,11 +34,15 @@ public class Types {
   public static final MajorType REQUIRED_BIT = required(MinorType.BIT);
   public static final MajorType OPTIONAL_BIT = optional(MinorType.BIT);
 
+  public static boolean isUnion(MajorType toType) {
+    return toType.getMinorType() == MinorType.UNION;
+  }
+
   public static enum Comparability {
     UNKNOWN, NONE, EQUAL, ORDERED;
   }
 
-  public static boolean isComplex(MajorType type) {
+  public static boolean isComplex(final MajorType type) {
     switch(type.getMinorType()) {
     case LIST:
     case MAP:
@@ -49,11 +52,11 @@ public class Types {
     return false;
   }
 
-  public static boolean isRepeated(MajorType type) {
+  public static boolean isRepeated(final MajorType type) {
     return type.getMode() == REPEATED ;
   }
 
-  public static boolean isNumericType(MajorType type) {
+  public static boolean isNumericType(final MajorType type) {
     if (type.getMode() == REPEATED) {
       return false;
     }
@@ -82,12 +85,92 @@ public class Types {
     }
   }
 
-  public static int getSqlType(MajorType type) {
-    if (type.getMode() == DataMode.REPEATED) {
+  /***
+   * Gets SQL data type name for given Drill RPC-/protobuf-level data type.
+   * @return
+   *   canonical keyword sequence for SQL data type (leading keywords in
+   *   corresponding {@code <data type>}; what
+   *   {@code INFORMATION_SCHEMA.COLUMNS.TYPE_NAME} would list)
+   */
+  public static String getSqlTypeName(final MajorType type) {
+    if (type.getMode() == DataMode.REPEATED || type.getMinorType() == MinorType.LIST) {
+      return "ARRAY";
+    }
+
+    switch (type.getMinorType()) {
+
+      // Standard SQL atomic data types:
+
+      case BIT:             return "BOOLEAN";
+
+      case SMALLINT:        return "SMALLINT";
+      case INT:             return "INTEGER";
+      case BIGINT:          return "BIGINT";
+
+      case FLOAT4:          return "FLOAT";
+      case FLOAT8:          return "DOUBLE";
+
+      case DECIMAL9:
+      case DECIMAL18:
+      case DECIMAL28DENSE:
+      case DECIMAL28SPARSE:
+      case DECIMAL38DENSE:
+      case DECIMAL38SPARSE: return "DECIMAL";
+
+      case VARCHAR:         return "CHARACTER VARYING";
+      case FIXEDCHAR:       return "CHARACTER";
+
+      case VAR16CHAR:       return "NATIONAL CHARACTER VARYING";
+      case FIXED16CHAR:     return "NATIONAL CHARACTER";
+
+      case VARBINARY:       return "BINARY VARYING";
+      case FIXEDBINARY:     return "BINARY";
+
+      case DATE:            return "DATE";
+      case TIME:            return "TIME";
+      case TIMETZ:          return "TIME WITH TIME ZONE";
+      case TIMESTAMP:       return "TIMESTAMP";
+      case TIMESTAMPTZ:     return "TIMESTAMP WITH TIME ZONE";
+
+      case INTERVALYEAR:
+      case INTERVALDAY:     return "INTERVAL";
+
+      // Non-standard SQL atomic data types:
+
+      case INTERVAL:        return "INTERVAL";
+      case MONEY:           return "DECIMAL";
+      case TINYINT:         return "TINYINT";
+
+      // Composite types and other types that are not atomic types (SQL standard
+      // or not) except ARRAY types (handled above):
+
+      case MAP:             return "MAP";
+      case LATE:            return "ANY";
+      case NULL:            return "NULL";
+      case UNION:           return "UNION";
+
+      // Internal types not actually used at level of SQL types(?):
+
+      case UINT1:          return "TINYINT";
+      case UINT2:          return "SMALLINT";
+      case UINT4:          return "INTEGER";
+      case UINT8:          return "BIGINT";
+
+      default:
+        throw new AssertionError(
+            "Unexpected/unhandled MinorType value " + type.getMinorType() );
+    }
+  }
+
+  /***
+   * Gets JDBC type code for given Drill RPC-/protobuf-level type.
+   */
+  public static int getJdbcTypeCode(final MajorType type) {
+    if (type.getMode() == DataMode.REPEATED || type.getMinorType() == MinorType.LIST) {
       return java.sql.Types.ARRAY;
     }
 
-    switch(type.getMinorType()) {
+    switch (type.getMinorType()) {
     case BIGINT:
       return java.sql.Types.BIGINT;
     case BIT:
@@ -118,10 +201,13 @@ public class Types {
     case MONEY:
       return java.sql.Types.DECIMAL;
     case NULL:
+      return java.sql.Types.NULL;
     case INTERVAL:
     case INTERVALYEAR:
     case INTERVALDAY:
+      return java.sql.Types.OTHER;  // JDBC (4.1) has nothing for INTERVAL
     case LATE:
+      return java.sql.Types.OTHER;
     case SMALLINT:
       return java.sql.Types.SMALLINT;
     case TIME:
@@ -130,7 +216,7 @@ public class Types {
     case TIMESTAMP:
       return java.sql.Types.TIMESTAMP;
     case TIMETZ:
-      return java.sql.Types.DATE;
+      return java.sql.Types.TIME;
     case TINYINT:
       return java.sql.Types.TINYINT;
     case UINT1:
@@ -146,25 +232,90 @@ public class Types {
     case VARBINARY:
       return java.sql.Types.VARBINARY;
     case VARCHAR:
-      return java.sql.Types.NVARCHAR;
+      return java.sql.Types.VARCHAR;
+    case UNION:
+      return java.sql.Types.OTHER;
     default:
-      throw new UnsupportedOperationException();
+      // TODO:  This isn't really an unsupported-operation/-type case; this
+      //   is an unexpected, code-out-of-sync-with-itself case, so use an
+      //   exception intended for that.
+      throw new UnsupportedOperationException(
+          "Unexpected/unhandled MinorType value " + type.getMinorType() );
     }
   }
 
-  public static boolean isUnSigned(MajorType type) {
-    switch(type.getMinorType()) {
-    case UINT1:
-    case UINT2:
-    case UINT4:
-    case UINT8:
-      return true;
-    default:
-      return false;
+  /**
+   * Reports whether given RPC-level type is a signed type (per semantics of
+   * {@link ResultSetMetaData#isSigned(int)}).
+   */
+  public static boolean isJdbcSignedType( final MajorType type ) {
+    final boolean isSigned;
+    switch ( type.getMode() ) {
+      case REPEATED:
+        isSigned = false;   // SQL ARRAY
+        break;
+      case REQUIRED:
+      case OPTIONAL:
+        switch ( type.getMinorType() ) {
+          // Verified signed types:
+          case SMALLINT:
+          case INT:             // SQL INTEGER
+          case BIGINT:
+          case FLOAT4:          // SQL REAL / FLOAT(N)
+          case FLOAT8:          // SQL DOUBLE PRECISION / FLOAT(N)
+          case INTERVALYEAR:    // SQL INTERVAL w/YEAR and/or MONTH
+          case INTERVALDAY:     // SQL INTERVAL w/DAY, HOUR, MINUTE and/or SECOND
+          // Not-yet seen/verified signed types:
+          case DECIMAL9:        // SQL DECIMAL (if used)
+          case DECIMAL18:       // SQL DECIMAL (if used)
+          case DECIMAL28SPARSE: // SQL DECIMAL (if used)
+          case DECIMAL38SPARSE: // SQL DECIMAL (if used)
+          case DECIMAL28DENSE:  // SQL DECIMAL (if used)
+          case DECIMAL38DENSE:  // SQL DECIMAL (if used)
+          case TINYINT:         // (not standard SQL)
+          case MONEY:           // (not standard SQL)
+          case INTERVAL:        // unknown (given INTERVALYEAR and INTERVALDAY)
+            isSigned = true;
+            break;
+          // Verified unsigned types:
+          case BIT:            // SQL BOOLEAN
+          case VARCHAR:
+          case FIXEDCHAR:      // SQL CHARACTER
+          case VARBINARY:
+          case FIXEDBINARY:    // SQL BINARY
+          case DATE:
+          case TIME:           // SQL TIME WITHOUT TIME ZONE
+          case TIMESTAMP:      // SQL TIMESTAMP WITHOUT TIME ZONE
+          // Not-yet seen/verified unsigned types:
+          case UINT1:
+          case UINT2:
+          case UINT4:
+          case UINT8:
+          case FIXED16CHAR:
+          case VAR16CHAR:
+          case GENERIC_OBJECT:
+          case LATE:
+          case LIST:
+          case MAP:
+          case UNION:
+          case NULL:
+          case TIMETZ:      // SQL TIME WITH TIME ZONE
+          case TIMESTAMPTZ: // SQL TIMESTAMP WITH TIME ZONE
+            isSigned = false;
+            break;
+          default:
+            throw new UnsupportedOperationException(
+                "Unexpected/unhandled MinorType value " + type.getMinorType() );
+        }
+        break;
+      default:
+        throw new UnsupportedOperationException(
+            "Unexpected/unhandled DataMode value " + type.getMode() );
     }
-
+    return isSigned;
   }
-  public static boolean usesHolderForGet(MajorType type) {
+
+  public static boolean usesHolderForGet(final MajorType type) {
     if (type.getMode() == REPEATED) {
       return true;
     }
@@ -192,11 +343,12 @@ public class Types {
 
   }
 
-  public static boolean isFixedWidthType(MajorType type) {
+  public static boolean isFixedWidthType(final MajorType type) {
     switch(type.getMinorType()) {
     case VARBINARY:
     case VAR16CHAR:
     case VARCHAR:
+    case UNION:
       return false;
     default:
       return true;
@@ -204,7 +356,7 @@ public class Types {
   }
 
 
-  public static boolean isStringScalarType(MajorType type) {
+  public static boolean isStringScalarType(final MajorType type) {
     if (type.getMode() == REPEATED) {
       return false;
     }
@@ -219,7 +371,7 @@ public class Types {
     }
   }
 
-  public static boolean isBytesScalarType(MajorType type) {
+  public static boolean isBytesScalarType(final MajorType type) {
     if (type.getMode() == REPEATED) {
       return false;
     }
@@ -232,7 +384,7 @@ public class Types {
     }
   }
 
-  public static Comparability getComparability(MajorType type) {
+  public static Comparability getComparability(final MajorType type) {
     if (type.getMode() == REPEATED) {
       return Comparability.NONE;
     }
@@ -254,17 +406,9 @@ public class Types {
   }
 
 
-  public static boolean softEquals(MajorType a, MajorType b, boolean allowNullSwap) {
+  public static boolean softEquals(final MajorType a, final MajorType b, final boolean allowNullSwap) {
     if (a.getMinorType() != b.getMinorType()) {
-      if (
-          (a.getMinorType() == MinorType.VARBINARY && b.getMinorType() == MinorType.VARCHAR) ||
-          (b.getMinorType() == MinorType.VARBINARY && a.getMinorType() == MinorType.VARCHAR)
-          ) {
-        // fall through;
-      } else {
         return false;
-      }
-
     }
     if(allowNullSwap) {
       switch (a.getMode()) {
@@ -280,31 +424,31 @@ public class Types {
     return a.getMode() == b.getMode();
   }
 
-  public static boolean isLateBind(MajorType type) {
+  public static boolean isLateBind(final MajorType type) {
     return type.getMinorType() == MinorType.LATE;
   }
 
-  public static MajorType withMode(MinorType type, DataMode mode) {
+  public static MajorType withMode(final MinorType type, final DataMode mode) {
     return MajorType.newBuilder().setMode(mode).setMinorType(type).build();
   }
 
-  public static MajorType withScaleAndPrecision(MinorType type, DataMode mode, int scale, int precision) {
+  public static MajorType withScaleAndPrecision(final MinorType type, final DataMode mode, final int scale, final int precision) {
     return MajorType.newBuilder().setMinorType(type).setMode(mode).setScale(scale).setPrecision(precision).build();
   }
 
-  public static MajorType required(MinorType type) {
+  public static MajorType required(final MinorType type) {
     return MajorType.newBuilder().setMode(DataMode.REQUIRED).setMinorType(type).build();
   }
 
-  public static MajorType repeated(MinorType type) {
+  public static MajorType repeated(final MinorType type) {
     return MajorType.newBuilder().setMode(REPEATED).setMinorType(type).build();
   }
 
-  public static MajorType optional(MinorType type) {
+  public static MajorType optional(final MinorType type) {
     return MajorType.newBuilder().setMode(DataMode.OPTIONAL).setMinorType(type).build();
   }
 
-  public static MajorType overrideMinorType(MajorType originalMajorType, MinorType overrideMinorType) {
+  public static MajorType overrideMinorType(final MajorType originalMajorType, final MinorType overrideMinorType) {
     switch (originalMajorType.getMode()) {
       case REPEATED:
         return repeated(overrideMinorType);
@@ -317,62 +461,82 @@ public class Types {
     }
   }
 
-  public static MajorType overrideMode(MajorType originalMajorType, DataMode overrideMode) {
+  public static MajorType overrideMode(final MajorType originalMajorType, final DataMode overrideMode) {
     return withScaleAndPrecision(originalMajorType.getMinorType(), overrideMode, originalMajorType.getScale(), originalMajorType.getPrecision());
   }
 
-  public static MajorType getMajorTypeFromName(String typeName) {
+  public static MajorType getMajorTypeFromName(final String typeName) {
     return getMajorTypeFromName(typeName, DataMode.REQUIRED);
   }
 
-  public static MajorType getMajorTypeFromName(String typeName, DataMode mode) {
+  public static MinorType getMinorTypeFromName(String typeName) {
+    typeName = typeName.toLowerCase();
+
     switch (typeName) {
     case "bool":
     case "boolean":
-      return withMode(MinorType.BIT, mode);
+      return MinorType.BIT;
     case "tinyint":
-      return withMode(MinorType.TINYINT, mode);
+      return MinorType.TINYINT;
     case "uint1":
-      return withMode(MinorType.UINT1, mode);
+      return MinorType.UINT1;
     case "smallint":
-      return withMode(MinorType.SMALLINT, mode);
+      return MinorType.SMALLINT;
     case "uint2":
-      return withMode(MinorType.UINT2, mode);
+      return MinorType.UINT2;
+    case "integer":
     case "int":
-      return withMode(MinorType.INT, mode);
+      return MinorType.INT;
     case "uint4":
-      return withMode(MinorType.UINT4, mode);
+      return MinorType.UINT4;
     case "bigint":
-      return withMode(MinorType.BIGINT, mode);
+      return MinorType.BIGINT;
     case "uint8":
-      return withMode(MinorType.UINT8, mode);
+      return MinorType.UINT8;
     case "float":
-      return withMode(MinorType.FLOAT4, mode);
+      return MinorType.FLOAT4;
     case "double":
-      return withMode(MinorType.FLOAT8, mode);
+      return MinorType.FLOAT8;
     case "decimal":
-      return withMode(MinorType.DECIMAL38SPARSE, mode);
+      return MinorType.DECIMAL38SPARSE;
+    case "symbol":
+    case "char":
     case "utf8":
     case "varchar":
-      return withMode(MinorType.VARCHAR, mode);
+      return MinorType.VARCHAR;
     case "utf16":
     case "string":
     case "var16char":
-      return withMode(MinorType.VAR16CHAR, mode);
+      return MinorType.VAR16CHAR;
+    case "timestamp":
+      return MinorType.TIMESTAMP;
+    case "interval_year_month":
+      return MinorType.INTERVALYEAR;
+    case "interval_day_time":
+      return MinorType.INTERVALDAY;
     case "date":
-      return withMode(MinorType.DATE, mode);
+      return MinorType.DATE;
     case "time":
-      return withMode(MinorType.TIME, mode);
+      return MinorType.TIME;
     case "binary":
-      return withMode(MinorType.VARBINARY, mode);
+      return MinorType.VARBINARY;
     case "json":
-      return withMode(MinorType.LATE, mode);
+    case "simplejson":
+    case "extendedjson":
+      return MinorType.LATE;
+    case "null":
+    case "any":
+      return MinorType.NULL;
     default:
       throw new UnsupportedOperationException("Could not determine type: " + typeName);
     }
   }
 
-  public static String getNameOfMinorType(MinorType type) {
+  public static MajorType getMajorTypeFromName(final String typeName, final DataMode mode) {
+    return withMode(getMinorTypeFromName(typeName), mode);
+  }
+
+  public static String getNameOfMinorType(final MinorType type) {
     switch (type) {
       case BIT:
         return "bool";
@@ -423,7 +587,7 @@ public class Types {
     }
   }
 
-  public static String toString(MajorType type) {
+  public static String toString(final MajorType type) {
     return type != null ? "MajorType[" + TextFormat.shortDebugString(type) + "]" : "null";
   }
 

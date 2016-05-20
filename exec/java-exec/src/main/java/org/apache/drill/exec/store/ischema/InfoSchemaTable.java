@@ -19,18 +19,23 @@ package org.apache.drill.exec.store.ischema;
 
 import java.util.List;
 
+import static org.apache.drill.exec.store.ischema.InfoSchemaConstants.*;
 import org.apache.drill.common.types.TypeProtos.MajorType;
 import org.apache.drill.common.types.TypeProtos.MinorType;
 import org.apache.drill.common.types.Types;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.sql.type.SqlTypeName;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.sql.type.SqlTypeName;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
+import org.apache.drill.exec.server.options.OptionManager;
 
-/** Base class of tables in INFORMATION_SCHEMA. Defines the table (fields and types) */
-public abstract class InfoSchemaTable implements InfoSchemaConstants{
+/**
+ * Base class for tables in INFORMATION_SCHEMA.  Defines the table (fields and
+ * types).
+ */
+public abstract class InfoSchemaTable {
 
   public static class Field {
     public String name;
@@ -81,102 +86,137 @@ public abstract class InfoSchemaTable implements InfoSchemaConstants{
     return typeFactory.createStructType(relTypes, fieldNames);
   }
 
-  public abstract RecordGenerator getRecordGenerator();
+  public abstract RecordGenerator getRecordGenerator(OptionManager optionManager);
 
   /** Layout for the CATALOGS table. */
   static public class Catalogs extends InfoSchemaTable {
+    // NOTE:  Nothing seems to verify that the types here (apparently used
+    // by SQL validation) match the types of the fields in Records.Catalogs).
     private static final List<Field> fields = ImmutableList.of(
-        Field.create(COL_CATALOG_NAME, VARCHAR),
-        Field.create(COL_CATALOG_DESCRIPTION, VARCHAR),
-        Field.create(COL_CATALOG_CONNECT, VARCHAR));
+        Field.create(CATS_COL_CATALOG_NAME, VARCHAR),
+        Field.create(CATS_COL_CATALOG_DESCRIPTION, VARCHAR),
+        Field.create(CATS_COL_CATALOG_CONNECT, VARCHAR));
 
     Catalogs() {
       super(TAB_CATALOGS, fields);
     }
 
     @Override
-    public RecordGenerator getRecordGenerator() {
-      return new RecordGenerator.Catalogs();
+    public RecordGenerator getRecordGenerator(OptionManager optionManager) {
+      return new RecordGenerator.Catalogs(optionManager);
     }
   }
 
   /** Layout for the SCHEMATA table. */
   public static class Schemata extends InfoSchemaTable {
+    // NOTE:  Nothing seems to verify that the types here (apparently used
+    // by SQL validation) match the types of the fields in Records.Schemata).
     private static final List<Field> fields = ImmutableList.of(
-        Field.create(COL_CATALOG_NAME, VARCHAR),
-        Field.create(COL_SCHEMA_NAME, VARCHAR),
-        Field.create(COL_SCHEMA_OWNER, VARCHAR),
-        Field.create(COL_TYPE, VARCHAR),
-        Field.create(COL_IS_MUTABLE, VARCHAR));
+        Field.create(SCHS_COL_CATALOG_NAME, VARCHAR),
+        Field.create(SCHS_COL_SCHEMA_NAME, VARCHAR),
+        Field.create(SCHS_COL_SCHEMA_OWNER, VARCHAR),
+        Field.create(SCHS_COL_TYPE, VARCHAR),
+        Field.create(SCHS_COL_IS_MUTABLE, VARCHAR));
 
     public Schemata() {
       super(TAB_SCHEMATA, fields);
     }
 
     @Override
-    public RecordGenerator getRecordGenerator() {
-      return new RecordGenerator.Schemata();
+    public RecordGenerator getRecordGenerator(OptionManager optionManager) {
+      return new RecordGenerator.Schemata(optionManager);
     }
   }
 
   /** Layout for the TABLES table. */
   public static class Tables extends InfoSchemaTable {
+    // NOTE:  Nothing seems to verify that the types here (apparently used
+    // by SQL validation) match the types of the fields in Records.Tables).
     private static final List<Field> fields = ImmutableList.of(
-        Field.create(COL_TABLE_CATALOG, VARCHAR),
-        Field.create(COL_TABLE_SCHEMA, VARCHAR),
-        Field.create(COL_TABLE_NAME, VARCHAR),
-        Field.create(COL_TABLE_TYPE, VARCHAR));
+        Field.create(SHRD_COL_TABLE_CATALOG, VARCHAR),
+        Field.create(SHRD_COL_TABLE_SCHEMA, VARCHAR),
+        Field.create(SHRD_COL_TABLE_NAME, VARCHAR),
+        Field.create(TBLS_COL_TABLE_TYPE, VARCHAR));
 
     public Tables() {
       super(TAB_TABLES, fields);
     }
 
     @Override
-    public RecordGenerator getRecordGenerator() {
-      return new RecordGenerator.Tables();
+    public RecordGenerator getRecordGenerator(OptionManager optionManager) {
+      return new RecordGenerator.Tables(optionManager);
     }
   }
 
   /** Layout for the VIEWS table. */
   static public class Views extends InfoSchemaTable {
+    // NOTE:  Nothing seems to verify that the types here (apparently used
+    // by SQL validation) match the types of the fields in Records.Views).
     private static final List<Field> fields = ImmutableList.of(
-        Field.create(COL_TABLE_CATALOG, VARCHAR),
-        Field.create(COL_TABLE_SCHEMA, VARCHAR),
-        Field.create(COL_TABLE_NAME, VARCHAR),
-        Field.create(COL_VIEW_DEFINITION, VARCHAR));
+        Field.create(SHRD_COL_TABLE_CATALOG, VARCHAR),
+        Field.create(SHRD_COL_TABLE_SCHEMA, VARCHAR),
+        Field.create(SHRD_COL_TABLE_NAME, VARCHAR),
+        Field.create(VIEWS_COL_VIEW_DEFINITION, VARCHAR));
 
     public Views() {
       super(TAB_VIEWS, fields);
     }
 
     @Override
-    public RecordGenerator getRecordGenerator() {
-      return new RecordGenerator.Views();
+    public RecordGenerator getRecordGenerator(OptionManager optionManager) {
+      return new RecordGenerator.Views(optionManager);
     }
   }
 
   /** Layout for the COLUMNS table. */
   public static class Columns extends InfoSchemaTable {
+    // COLUMNS columns, from SQL standard:
+    // 1. TABLE_CATALOG
+    // 2. TABLE_SCHEMA
+    // 3. TABLE_NAME
+    // 4. COLUMN_NAME
+    // 5. ORDINAL_POSITION
+    // 6. COLUMN_DEFAULT
+    // 7. IS_NULLABLE
+    // 8. DATA_TYPE
+    // 9. CHARACTER_MAXIMUM_LENGTH
+    // 10. CHARACTER_OCTET_LENGTH
+    // 11. NUMERIC_PRECISION
+    // 12. NUMERIC_PRECISION_RADIX
+    // 13. NUMERIC_SCALE
+    // 14. DATETIME_PRECISION
+    // 15. INTERVAL_TYPE
+    // 16. INTERVAL_PRECISION
+    // 17. CHARACTER_SET_CATALOG ...
+
+    // NOTE:  Nothing seems to verify that the types here (apparently used
+    // by SQL validation) match the types of the fields in Records.Columns).
     private static final List<Field> fields = ImmutableList.of(
-        Field.create(COL_TABLE_CATALOG, VARCHAR),
-        Field.create(COL_TABLE_SCHEMA, VARCHAR),
-        Field.create(COL_TABLE_NAME, VARCHAR),
-        Field.create(COL_COLUMN_NAME, VARCHAR),
-        Field.create(COL_ORDINAL_POSITION, INT),
-        Field.create(COL_IS_NULLABLE, VARCHAR),
-        Field.create(COL_DATA_TYPE, VARCHAR),
-        Field.create(COL_CHARACTER_MAXIMUM_LENGTH, INT),
-        Field.create(COL_NUMERIC_PRECISION_RADIX, INT),
-        Field.create(COL_NUMERIC_SCALE, INT),
-        Field.create(COL_NUMERIC_PRECISION, INT));
+        Field.create(SHRD_COL_TABLE_CATALOG, VARCHAR),
+        Field.create(SHRD_COL_TABLE_SCHEMA, VARCHAR),
+        Field.create(SHRD_COL_TABLE_NAME, VARCHAR),
+        Field.create(COLS_COL_COLUMN_NAME, VARCHAR),
+        Field.create(COLS_COL_ORDINAL_POSITION, INT),
+        Field.create(COLS_COL_COLUMN_DEFAULT, VARCHAR),
+        Field.create(COLS_COL_IS_NULLABLE, VARCHAR),
+        Field.create(COLS_COL_DATA_TYPE, VARCHAR),
+        Field.create(COLS_COL_CHARACTER_MAXIMUM_LENGTH, INT),
+        Field.create(COLS_COL_CHARACTER_OCTET_LENGTH, INT),
+        Field.create(COLS_COL_NUMERIC_PRECISION, INT),
+        Field.create(COLS_COL_NUMERIC_PRECISION_RADIX, INT),
+        Field.create(COLS_COL_NUMERIC_SCALE, INT),
+        Field.create(COLS_COL_DATETIME_PRECISION, INT),
+        Field.create(COLS_COL_INTERVAL_TYPE, VARCHAR),
+        Field.create(COLS_COL_INTERVAL_PRECISION, INT)
+        );
 
     public Columns() {
       super(TAB_COLUMNS, fields);
     }
 
     @Override
-    public RecordGenerator getRecordGenerator() {
-      return new RecordGenerator.Columns();
+    public RecordGenerator getRecordGenerator(OptionManager optionManager) {
+      return new RecordGenerator.Columns(optionManager);
     }
   }
 }

@@ -19,23 +19,25 @@ package org.apache.drill.exec.record;
 
 import io.netty.buffer.DrillBuf;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.apache.drill.exec.proto.BitData.FragmentRecordBatch;
 import org.apache.drill.exec.rpc.data.AckSender;
 
 public class RawFragmentBatch {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(RawFragmentBatch.class);
+  //private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(RawFragmentBatch.class);
 
-  final FragmentRecordBatch header;
-  final DrillBuf body;
-  final AckSender sender;
+  private final FragmentRecordBatch header;
+  private final DrillBuf body;
+  private final AckSender sender;
+  private final AtomicBoolean ackSent = new AtomicBoolean(false);
 
   public RawFragmentBatch(FragmentRecordBatch header, DrillBuf body, AckSender sender) {
-    super();
     this.header = header;
-    this.body = body;
     this.sender = sender;
+    this.body = body;
     if (body != null) {
-      body.retain();
+      body.retain(1);
     }
   }
 
@@ -54,21 +56,25 @@ public class RawFragmentBatch {
 
   public void release() {
     if (body != null) {
-      body.release();
+      body.release(1);
     }
   }
-
 
   public AckSender getSender() {
     return sender;
   }
 
-  public void sendOk() {
-    sender.sendOk();
+  public synchronized void sendOk() {
+    if (sender != null && ackSent.compareAndSet(false, true)) {
+      sender.sendOk();
+    }
   }
 
   public long getByteCount() {
     return body == null ? 0 : body.readableBytes();
   }
 
+  public boolean isAckSent() {
+    return ackSent.get();
+  }
 }

@@ -17,20 +17,19 @@
  */
 package org.apache.drill.exec.work.fragment;
 
+import java.io.IOException;
+
 import org.apache.drill.exec.exception.FragmentSetupException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
-import org.apache.drill.exec.record.RawFragmentBatch;
 import org.apache.drill.exec.rpc.RemoteConnection;
-
-import java.io.IOException;
+import org.apache.drill.exec.rpc.data.IncomingDataBatch;
 
 /**
  * The Fragment Manager is responsible managing incoming data and executing a fragment. Once enough data and resources
  * are avialable, a fragment manager will start a fragment executor to run the associated fragment.
  */
 public interface FragmentManager {
-
   /**
    * Handle the next incoming record batch.
    *
@@ -38,28 +37,43 @@ public interface FragmentManager {
    * @return True if the fragment has enough incoming data to be able to be run.
    * @throws FragmentSetupException, IOException
    */
-  public abstract boolean handle(RawFragmentBatch batch) throws FragmentSetupException, IOException;
+  boolean handle(IncomingDataBatch batch) throws FragmentSetupException, IOException;
 
   /**
    * Get the fragment runner for this incoming fragment. Note, this can only be requested once.
    *
    * @return
    */
-  public abstract FragmentExecutor getRunnable();
+  FragmentExecutor getRunnable();
 
-  public abstract void cancel();
+  void cancel();
 
-  public boolean isWaiting();
+  /**
+   * Find out if the FragmentManager has been cancelled.
+   *
+   * @return true if the FragmentManager has been cancelled.
+   */
+  boolean isCancelled();
 
-  public abstract FragmentHandle getHandle();
+  /**
+   * If the executor is paused (for testing), this method should unpause the executor. This method should handle
+   * multiple calls.
+   */
+  void unpause();
 
-  public abstract FragmentContext getFragmentContext();
+  boolean isWaiting();
 
-  public abstract void addConnection(RemoteConnection connection);
+  FragmentHandle getHandle();
+
+  FragmentContext getFragmentContext();
+
+  void addConnection(RemoteConnection connection);
+
+  void receivingFragmentFinished(final FragmentHandle handle);
 
   /**
    *  Sets autoRead property on all connections
    * @param autoRead
    */
-  public abstract void setAutoRead(boolean autoRead);
+  void setAutoRead(boolean autoRead);
 }

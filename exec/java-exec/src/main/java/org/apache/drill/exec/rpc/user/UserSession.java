@@ -17,10 +17,19 @@
  */
 package org.apache.drill.exec.rpc.user;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import net.hydromatic.optiq.SchemaPlus;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Lists;
 
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.tools.ValidationException;
+import org.apache.drill.exec.planner.sql.SchemaUtilites;
 import org.apache.drill.exec.proto.UserBitShared.UserCredentials;
 import org.apache.drill.exec.proto.UserProtos.Property;
 import org.apache.drill.exec.proto.UserProtos.UserProperties;
@@ -30,16 +39,30 @@ import org.apache.drill.exec.server.options.SessionOptionManager;
 import com.google.common.collect.Maps;
 
 public class UserSession {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(UserSession.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(UserSession.class);
 
   public static final String SCHEMA = "schema";
+  public static final String USER = "user";
+  public static final String PASSWORD = "password";
+  public static final String IMPERSONATION_TARGET = "impersonation_target";
 
-  private DrillUser user;
-  private boolean enableExchanges = true;
+  // known property names in lower case
+  private static final Set<String> knownProperties = ImmutableSet.of(SCHEMA, USER, PASSWORD, IMPERSONATION_TARGET);
+
   private boolean supportComplexTypes = false;
   private UserCredentials credentials;
   private Map<String, String> properties;
   private OptionManager sessionOptions;
+  private final AtomicInteger queryCount;
+
+  /**
+   * Implementations of this interface are allowed to increment queryCount.
+   * {@link org.apache.drill.exec.work.user.UserWorker} should have a member that implements the interface.
+   * No other core class should implement this interface. Test classes may implement (see ControlsInjectionUtil).
+   */
+  public static interface QueryCountIncrementer {
+    public void increment(final UserSession session);
+  }
 
   public static class Builder {
     UserSession userSession;
@@ -54,7 +77,7 @@ public class UserSession {
     }
 
     public Builder withOptionManager(OptionManager systemOptions) {
-      userSession.sessionOptions = new SessionOptionManager(systemOptions);
+      userSession.sessionOptions = new SessionOptionManager(systemOptions, userSession);
       return this;
     }
 
@@ -62,8 +85,13 @@ public class UserSession {
       userSession.properties = Maps.newHashMap();
       if (properties != null) {
         for (int i = 0; i < properties.getPropertiesCount(); i++) {
-          Property prop = properties.getProperties(i);
-          userSession.properties.put(prop.getKey(), prop.getValue());
+          final Property property = properties.getProperties(i);
+          final String propertyName = property.getKey().toLowerCase();
+          if (knownProperties.contains(propertyName)) {
+            userSession.properties.put(propertyName, property.getValue());
+          } else {
+            logger.warn("Ignoring unknown property: {}", propertyName);
+          }
         }
       }
       return this;
@@ -85,7 +113,9 @@ public class UserSession {
     }
   }
 
-  private UserSession() { }
+  private UserSession() {
+    queryCount = new AtomicInteger(0);
+  }
 
   public boolean isSupportComplexTypes() {
     return supportComplexTypes;
@@ -95,36 +125,96 @@ public class UserSession {
     return sessionOptions;
   }
 
-  public DrillUser getUser() {
-    return user;
-  }
-
   public UserCredentials getCredentials() {
     return credentials;
   }
 
   /**
-   * Update the schema path for the session.
-   * @param fullPath The desired path to set to.
-   * @param schema The root schema to find this path within.
-   * @return true if the path was set successfully.  false if this path was unavailable.
+   * Replace current user credentials with the given user's credentials. Meant to be called only by a
+   * {@link InboundImpersonationManager impersonation manager}.
+   *
+   * @param impersonationManager impersonation manager making this call
+   * @param newCredentials user credentials to change to
    */
-  public boolean setDefaultSchemaPath(String fullPath, SchemaPlus schema) {
-    SchemaPlus newDefault = findSchema(schema, fullPath);
+  public void replaceUserCredentials(final InboundImpersonationManager impersonationManager,
+                                     final UserCredentials newCredentials) {
+    Preconditions.checkNotNull(impersonationManager, "User credentials can only be replaced by an" +
+        " impersonation manager.");
+    credentials = newCredentials;
+  }
+
+  public String getTargetUserName() {
+    return properties.get(IMPERSONATION_TARGET);
+  }
+
+  public String getDefaultSchemaName() {
+    return getProp(SCHEMA);
+  }
+
+  public void incrementQueryCount(final QueryCountIncrementer incrementer) {
+    assert incrementer != null;
+    queryCount.incrementAndGet();
+  }
+
+  public int getQueryCount() {
+    return queryCount.get();
+  }
+
+  /**
+   * Update the schema path for the session.
+   * @param newDefaultSchemaPath New default schema path to set. It could be relative to the current default schema or
+   *                             absolute schema.
+   * @param currentDefaultSchema Current default schema.
+   * @throws ValidationException If the given default schema path is invalid in current schema tree.
+   */
+  public void setDefaultSchemaPath(String newDefaultSchemaPath, SchemaPlus currentDefaultSchema)
+      throws ValidationException {
+    final List<String> newDefaultPathAsList = Lists.newArrayList(newDefaultSchemaPath.split("\\."));
+    SchemaPlus newDefault;
+
+    // First try to find the given schema relative to the current default schema.
+    newDefault = SchemaUtilites.findSchema(currentDefaultSchema, newDefaultPathAsList);
+
     if (newDefault == null) {
-      return false;
+      // If we fail to find the schema relative to current default schema, consider the given new default schema path as
+      // absolute schema path.
+      newDefault = SchemaUtilites.findSchema(currentDefaultSchema, newDefaultPathAsList);
     }
-    setProp(SCHEMA, fullPath);
-    return true;
+
+    if (newDefault == null) {
+      SchemaUtilites.throwSchemaNotFoundException(currentDefaultSchema, newDefaultSchemaPath);
+    }
+
+    setProp(SCHEMA, SchemaUtilites.getSchemaPath(newDefault));
+  }
+
+  /**
+   * @return Get current default schema path.
+   */
+  public String getDefaultSchemaPath() {
+    return getProp(SCHEMA);
   }
 
   /**
    * Get default schema from current default schema path and given schema tree.
    * @param rootSchema
-   * @return A {@link net.hydromatic.optiq.SchemaPlus} object.
+   * @return A {@link org.apache.calcite.schema.SchemaPlus} object.
    */
   public SchemaPlus getDefaultSchema(SchemaPlus rootSchema) {
-    return findSchema(rootSchema, getProp(SCHEMA));
+    final String defaultSchemaPath = getProp(SCHEMA);
+
+    if (Strings.isNullOrEmpty(defaultSchemaPath)) {
+      return null;
+    }
+
+    final SchemaPlus defaultSchema = SchemaUtilites.findSchema(rootSchema, defaultSchemaPath);
+
+    if (defaultSchema == null) {
+      // If the current schema resolves to null, return root schema as the current default schema.
+      return defaultSchema;
+    }
+
+    return defaultSchema;
   }
 
   public boolean setSessionOption(String name, String value) {
@@ -138,17 +228,4 @@ public class UserSession {
   private void setProp(String key, String value) {
     properties.put(key, value);
   }
-
-  private SchemaPlus findSchema(SchemaPlus rootSchema, String schemaPath) {
-    String[] paths = schemaPath.split("\\.");
-    SchemaPlus schema = rootSchema;
-    for (String p : paths) {
-      schema = schema.getSubSchema(p);
-      if (schema == null) {
-        break;
-      }
-    }
-    return schema;
-  }
-
 }

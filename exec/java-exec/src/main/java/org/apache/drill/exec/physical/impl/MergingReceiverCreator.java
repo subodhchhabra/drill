@@ -20,7 +20,7 @@ package org.apache.drill.exec.physical.impl;
 import java.util.List;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
-import org.apache.drill.exec.memory.OutOfMemoryException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.physical.config.MergingReceiverPOP;
 import org.apache.drill.exec.physical.impl.mergereceiver.MergingRecordBatch;
@@ -32,7 +32,7 @@ public class MergingReceiverCreator implements BatchCreator<MergingReceiverPOP> 
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(MergingReceiverCreator.class);
 
   @Override
-  public RecordBatch getBatch(FragmentContext context,
+  public MergingRecordBatch getBatch(FragmentContext context,
                               MergingReceiverPOP receiver,
                               List<RecordBatch> children)
       throws ExecutionSetupException, OutOfMemoryException {

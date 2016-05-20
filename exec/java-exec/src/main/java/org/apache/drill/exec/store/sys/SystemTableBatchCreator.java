@@ -29,16 +29,23 @@ import org.apache.drill.exec.record.RecordBatch;
 import org.apache.drill.exec.store.RecordReader;
 import org.apache.drill.exec.store.pojo.PojoRecordReader;
 
-public class SystemTableBatchCreator implements BatchCreator<SystemTableScan>{
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SystemTableBatchCreator.class);
+/**
+ * This class creates batches based on the the type of {@link org.apache.drill.exec.store.sys.SystemTable}.
+ * The distributed tables and the local tables use different record readers.
+ * Local system tables do not require a full-fledged query because these records are present on every Drillbit.
+ */
+public class SystemTableBatchCreator implements BatchCreator<SystemTableScan> {
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SystemTableBatchCreator.class);
 
   @SuppressWarnings({ "rawtypes", "unchecked" })
   @Override
-  public RecordBatch getBatch(FragmentContext context, SystemTableScan scan, List<RecordBatch> children)
-      throws ExecutionSetupException {
-    Iterator<Object> iter = scan.getPlugin().getRecordIterator(context, scan.getTable());
-    PojoRecordReader reader = new PojoRecordReader(scan.getTable().getPojoClass(), iter);
+  public ScanBatch getBatch(final FragmentContext context, final SystemTableScan scan,
+                              final List<RecordBatch> children)
+    throws ExecutionSetupException {
+    final SystemTable table = scan.getTable();
+    final Iterator<Object> iterator = table.getIterator(context);
+    final RecordReader reader = new PojoRecordReader(table.getPojoClass(), iterator);
 
-    return new ScanBatch(scan, context, Collections.singleton( (RecordReader) reader).iterator());
+    return new ScanBatch(scan, context, Collections.singleton(reader).iterator());
   }
 }

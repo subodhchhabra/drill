@@ -22,43 +22,38 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
+import org.apache.calcite.plan.RelOptCluster;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.plan.RelOptRuleCall;
+import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.rel.RelCollation;
+import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.rel.type.RelDataTypeFactory;
+import org.apache.calcite.rel.type.RelDataTypeField;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexInputRef;
+import org.apache.calcite.rex.RexLiteral;
+import org.apache.calcite.rex.RexLocalRef;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexShuttle;
+import org.apache.calcite.rex.RexVisitorImpl;
 import org.apache.drill.common.expression.ExpressionPosition;
 import org.apache.drill.common.expression.FieldReference;
-import org.apache.drill.common.expression.FunctionCall;
-import org.apache.drill.common.expression.LogicalExpression;
 import org.apache.drill.common.expression.PathSegment;
 import org.apache.drill.common.expression.PathSegment.ArraySegment;
 import org.apache.drill.common.expression.PathSegment.NameSegment;
 import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.logical.data.Order.Ordering;
-import org.apache.drill.exec.planner.physical.DrillDistributionTrait.DistributionField;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
-import org.eigenbase.rel.RelCollation;
-import org.eigenbase.rel.RelFieldCollation;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptCluster;
-import org.eigenbase.relopt.RelOptPlanner;
-import org.eigenbase.relopt.RelOptRuleCall;
-import org.eigenbase.relopt.RelTraitSet;
-import org.eigenbase.reltype.RelDataType;
-import org.eigenbase.reltype.RelDataTypeFactory;
-import org.eigenbase.reltype.RelDataTypeField;
-import org.eigenbase.rex.RexCall;
-import org.eigenbase.rex.RexInputRef;
-import org.eigenbase.rex.RexLiteral;
-import org.eigenbase.rex.RexLocalRef;
-import org.eigenbase.rex.RexNode;
-import org.eigenbase.rex.RexShuttle;
-import org.eigenbase.rex.RexVisitorImpl;
 
-import com.carrotsearch.hppc.IntIntOpenHashMap;
+import com.carrotsearch.hppc.IntIntHashMap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
 public class PrelUtil {
-
-  public static final String HASH_EXPR_NAME = "E_X_P_R_H_A_S_H_F_I_E_L_D";
 
   public static List<Ordering> getOrdering(RelCollation collation, RelDataType rowType) {
     List<Ordering> orderExpr = Lists.newArrayList();
@@ -66,38 +61,13 @@ public class PrelUtil {
     final List<String> childFields = rowType.getFieldNames();
 
     for (RelFieldCollation fc: collation.getFieldCollations() ) {
-      FieldReference fr = new FieldReference(childFields.get(fc.getFieldIndex()), ExpressionPosition.UNKNOWN);
+      FieldReference fr = new FieldReference(childFields.get(fc.getFieldIndex()), ExpressionPosition.UNKNOWN, false);
       orderExpr.add(new Ordering(fc.getDirection(), fr, fc.nullDirection));
     }
 
     return orderExpr;
   }
 
-  /*
-   * Return a hash expression :  hash(field1) ^ hash(field2) ^ hash(field3) ... ^ hash(field_n)
-   */
-  public static LogicalExpression getHashExpression(List<DistributionField> fields, RelDataType rowType) {
-    assert fields.size() > 0;
-
-    final List<String> childFields = rowType.getFieldNames();
-
-    // If we already included a field with hash - no need to calculate hash further down
-    if ( childFields.contains(HASH_EXPR_NAME)) {
-      return new FieldReference(HASH_EXPR_NAME);
-    }
-
-    FieldReference fr = new FieldReference(childFields.get(fields.get(0).getFieldId()), ExpressionPosition.UNKNOWN);
-    FunctionCall func = new FunctionCall("hash",  ImmutableList.of((LogicalExpression)fr), ExpressionPosition.UNKNOWN);
-
-    for (int i = 1; i<fields.size(); i++) {
-      fr = new FieldReference(childFields.get(fields.get(i).getFieldId()), ExpressionPosition.UNKNOWN);
-      FunctionCall func2 = new FunctionCall("hash",  ImmutableList.of((LogicalExpression)fr), ExpressionPosition.UNKNOWN);
-
-      func = new FunctionCall("xor", ImmutableList.of((LogicalExpression)func, (LogicalExpression)func2), ExpressionPosition.UNKNOWN);
-    }
-
-    return func;
-  }
 
   public static Iterator<Prel> iter(RelNode... nodes) {
     return (Iterator<Prel>) (Object) Arrays.asList(nodes).iterator();
@@ -107,7 +77,11 @@ public class PrelUtil {
     return (Iterator<Prel>) (Object) nodes.iterator();
   }
 
-  public static PlannerSettings getSettings(RelOptCluster cluster) {
+  public static PlannerSettings getSettings(final RelOptCluster cluster) {
+    return getPlannerSettings(cluster);
+  }
+
+  public static PlannerSettings getPlannerSettings(final RelOptCluster cluster) {
     return cluster.getPlanner().getContext().unwrap(PlannerSettings.class);
   }
 
@@ -123,6 +97,14 @@ public class PrelUtil {
       }
     }
     return new SelectionVectorRemoverPrel(prel);
+  }
+
+  public static int getLastUsedColumnReference(List<RexNode> projects) {
+    LastUsedRefVisitor lastUsed = new LastUsedRefVisitor();
+    for (RexNode rex : projects) {
+      rex.accept(lastUsed);
+    }
+    return lastUsed.getLastUsedReference();
   }
 
   public static ProjectPushInfo getColumns(RelDataType rowType, List<RexNode> projects) {
@@ -211,7 +193,7 @@ public class PrelUtil {
 
       this.fieldNames = Lists.newArrayListWithCapacity(desiredFields.size());
       this.types = Lists.newArrayListWithCapacity(desiredFields.size());
-      IntIntOpenHashMap oldToNewIds = new IntIntOpenHashMap();
+      IntIntHashMap oldToNewIds = new IntIntHashMap();
 
       int i =0;
       for (DesiredField f : desiredFields) {
@@ -241,12 +223,40 @@ public class PrelUtil {
     }
   }
 
+  // Simple visitor class to determine the last used reference in the expression
+  private static class LastUsedRefVisitor extends RexVisitorImpl<Void> {
+
+    int lastUsedRef = -1;
+
+    protected LastUsedRefVisitor() {
+      super(true);
+    }
+
+    @Override
+    public Void visitInputRef(RexInputRef inputRef) {
+      lastUsedRef = Math.max(lastUsedRef, inputRef.getIndex());
+      return null;
+    }
+
+    @Override
+    public Void visitCall(RexCall call) {
+      for (RexNode operand : call.operands) {
+        operand.accept(this);
+      }
+      return null;
+    }
+
+    public int getLastUsedReference() {
+      return lastUsedRef;
+    }
+  }
+
   /** Visitor that finds the set of inputs that are used. */
   private static class RefFieldsVisitor extends RexVisitorImpl<PathSegment> {
     final Set<SchemaPath> columns = Sets.newLinkedHashSet();
     final private List<String> fieldNames;
     final private List<RelDataTypeField> fields;
-    final private Set<DesiredField> desiredFields = Sets.newHashSet();
+    final private Set<DesiredField> desiredFields = Sets.newLinkedHashSet();
 
     public RefFieldsVisitor(RelDataType rowType) {
       super(true);
@@ -337,9 +347,9 @@ public class PrelUtil {
 
   public static class InputRewriter extends RexShuttle {
 
-    final IntIntOpenHashMap map;
+    final IntIntHashMap map;
 
-    public InputRewriter(IntIntOpenHashMap map) {
+    public InputRewriter(IntIntHashMap map) {
       super();
       this.map = map;
     }

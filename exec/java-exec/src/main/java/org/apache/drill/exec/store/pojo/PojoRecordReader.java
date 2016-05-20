@@ -25,11 +25,11 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.drill.common.exceptions.ExecutionSetupException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.physical.impl.OutputMutator;
-import org.apache.drill.exec.record.MaterializedField.Key;
+import org.apache.drill.exec.record.MaterializedField;
 import org.apache.drill.exec.store.AbstractRecordReader;
 import org.apache.drill.exec.store.pojo.Writers.BitWriter;
 import org.apache.drill.exec.store.pojo.Writers.DoubleWriter;
@@ -42,13 +42,16 @@ import org.apache.drill.exec.store.pojo.Writers.NDoubleWriter;
 import org.apache.drill.exec.store.pojo.Writers.NIntWriter;
 import org.apache.drill.exec.store.pojo.Writers.NTimeStampWriter;
 import org.apache.drill.exec.store.pojo.Writers.StringWriter;
+import org.apache.drill.exec.testing.ControlsInjector;
+import org.apache.drill.exec.testing.ControlsInjectorFactory;
 import org.apache.drill.exec.vector.AllocationHelper;
 import org.apache.drill.exec.vector.ValueVector;
 
 import com.google.common.collect.Lists;
 
 public class PojoRecordReader<T> extends AbstractRecordReader {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PojoRecordReader.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(PojoRecordReader.class);
+  private static final ControlsInjector injector = ControlsInjectorFactory.getInjector(PojoRecordReader.class);
 
   public final int forJsonIgnore = 1;
 
@@ -64,16 +67,9 @@ public class PojoRecordReader<T> extends AbstractRecordReader {
     this.iterator = iterator;
   }
 
-  public OperatorContext getOperatorContext() {
-    return operatorContext;
-  }
-
-  public void setOperatorContext(OperatorContext operatorContext) {
-    this.operatorContext = operatorContext;
-  }
-
   @Override
-  public void setup(OutputMutator output) throws ExecutionSetupException {
+  public void setup(OperatorContext context, OutputMutator output) throws ExecutionSetupException {
+    operatorContext = context;
     try {
       Field[] fields = pojoClass.getDeclaredFields();
       List<PojoWriter> writers = Lists.newArrayList();
@@ -126,8 +122,8 @@ public class PojoRecordReader<T> extends AbstractRecordReader {
   }
 
   @Override
-  public void allocate(Map<Key, ValueVector> vectorMap) throws OutOfMemoryException {
-    for (ValueVector v : vectorMap.values()) {
+  public void allocate(Map<String, ValueVector> vectorMap) throws OutOfMemoryException {
+    for (final ValueVector v : vectorMap.values()) {
       AllocationHelper.allocate(v, Character.MAX_VALUE, 50, 10);
     }
   }
@@ -147,10 +143,9 @@ public class PojoRecordReader<T> extends AbstractRecordReader {
   @Override
   public int next() {
     boolean allocated = false;
-
+    injector.injectPause(operatorContext.getExecutionControls(), "read-next", logger);
     try {
       int i =0;
-      outside:
       while (doCurrent || iterator.hasNext()) {
         if (doCurrent) {
           doCurrent = false;
@@ -179,7 +174,6 @@ public class PojoRecordReader<T> extends AbstractRecordReader {
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
   }
-
 }

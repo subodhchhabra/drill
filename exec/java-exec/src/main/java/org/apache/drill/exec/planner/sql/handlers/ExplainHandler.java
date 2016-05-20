@@ -19,9 +19,15 @@ package org.apache.drill.exec.planner.sql.handlers;
 
 import java.io.IOException;
 
-import net.hydromatic.optiq.tools.RelConversionException;
-import net.hydromatic.optiq.tools.ValidationException;
-
+import org.apache.calcite.plan.RelOptUtil;
+import org.apache.calcite.rel.RelNode;
+import org.apache.calcite.rel.type.RelDataType;
+import org.apache.calcite.sql.SqlExplain;
+import org.apache.calcite.sql.SqlExplainLevel;
+import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.tools.RelConversionException;
+import org.apache.calcite.tools.ValidationException;
 import org.apache.drill.common.logical.LogicalPlan;
 import org.apache.drill.common.logical.PlanProperties.Generator.ResultMode;
 import org.apache.drill.exec.ops.QueryContext;
@@ -33,33 +39,26 @@ import org.apache.drill.exec.planner.logical.DrillRel;
 import org.apache.drill.exec.planner.physical.Prel;
 import org.apache.drill.exec.planner.physical.explain.PrelSequencer;
 import org.apache.drill.exec.planner.sql.DirectPlan;
+import org.apache.drill.exec.util.Pointer;
 import org.apache.drill.exec.work.foreman.ForemanSetupException;
-import org.eigenbase.rel.RelNode;
-import org.eigenbase.relopt.RelOptUtil;
-import org.eigenbase.sql.SqlExplain;
-import org.eigenbase.sql.SqlExplainLevel;
-import org.eigenbase.sql.SqlLiteral;
-import org.eigenbase.sql.SqlNode;
 
 public class ExplainHandler extends DefaultSqlHandler {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ExplainHandler.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ExplainHandler.class);
 
   private ResultMode mode;
   private SqlExplainLevel level = SqlExplainLevel.ALL_ATTRIBUTES;
-  public ExplainHandler(SqlHandlerConfig config) {
-    super(config);
+  public ExplainHandler(SqlHandlerConfig config, Pointer<String> textPlan) {
+    super(config, textPlan);
   }
 
   @Override
-  public PhysicalPlan getPlan(SqlNode node) throws ValidationException, RelConversionException, IOException, ForemanSetupException {
-    SqlNode sqlNode = rewrite(node);
-    SqlNode validated = validateNode(sqlNode);
-    RelNode rel = convertToRel(validated);
-    rel = preprocessNode(rel);
+  public PhysicalPlan getPlan(SqlNode sqlNode) throws ValidationException, RelConversionException, IOException, ForemanSetupException {
+    final ConvertedRelNode convertedRelNode = validateAndConvert(sqlNode);
+    final RelDataType validatedRowType = convertedRelNode.getValidatedRowType();
+    final RelNode queryRelNode = convertedRelNode.getConvertedNode();
 
-    log("Optiq Logical", rel);
-    DrillRel drel = convertToDrel(rel);
-    log("Drill Logical", drel);
+    log("Calcite", queryRelNode, logger, null);
+    DrillRel drel = convertToDrel(queryRelNode, validatedRowType);
 
     if (mode == ResultMode.LOGICAL) {
       LogicalExplain logicalResult = new LogicalExplain(drel, level, context);
@@ -67,10 +66,10 @@ public class ExplainHandler extends DefaultSqlHandler {
     }
 
     Prel prel = convertToPrel(drel);
-    log("Drill Physical", prel);
+    logAndSetTextPlan("Drill Physical", prel, logger);
     PhysicalOperator pop = convertToPop(prel);
     PhysicalPlan plan = convertToPlan(pop);
-    log("Drill Plan", plan);
+    log("Drill Plan", plan, logger);
     PhysicalExplain physicalResult = new PhysicalExplain(prel, plan, level, context);
     return DirectPlan.createDirectPlan(context, physicalResult);
   }
@@ -104,10 +103,10 @@ public class ExplainHandler extends DefaultSqlHandler {
 
     public LogicalExplain(RelNode node, SqlExplainLevel level, QueryContext context) {
       this.text = RelOptUtil.toString(node, level);
-      DrillImplementor implementor = new DrillImplementor(new DrillParseContext(), ResultMode.LOGICAL);
+      DrillImplementor implementor = new DrillImplementor(new DrillParseContext(context.getPlannerSettings()), ResultMode.LOGICAL);
       implementor.go( (DrillRel) node);
       LogicalPlan plan = implementor.getPlan();
-      this.json = plan.unparse(context.getConfig());
+      this.json = plan.unparse(context.getLpPersistence());
     }
   }
 
@@ -117,7 +116,7 @@ public class ExplainHandler extends DefaultSqlHandler {
 
     public PhysicalExplain(RelNode node, PhysicalPlan plan, SqlExplainLevel level, QueryContext context) {
       this.text = PrelSequencer.printWithIds((Prel) node, level);
-      this.json = plan.unparse(context.getConfig().getMapper().writer());
+      this.json = plan.unparse(context.getLpPersistence().getMapper().writer());
     }
   }
 

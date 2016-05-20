@@ -22,6 +22,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.calcite.rel.RelFieldCollation.Direction;
+import org.apache.drill.common.DrillAutoCloseables;
 import org.apache.drill.common.expression.ErrorCollector;
 import org.apache.drill.common.expression.ErrorCollectorImpl;
 import org.apache.drill.common.expression.LogicalExpression;
@@ -30,6 +32,7 @@ import org.apache.drill.common.logical.data.Order.Ordering;
 import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.compile.sig.MappingSet;
 import org.apache.drill.exec.exception.ClassTransformationException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.ClassGenerator;
 import org.apache.drill.exec.expr.ClassGenerator.HoldingContainer;
@@ -37,7 +40,6 @@ import org.apache.drill.exec.expr.CodeGenerator;
 import org.apache.drill.exec.expr.ExpressionTreeMaterializer;
 import org.apache.drill.exec.expr.TypeHelper;
 import org.apache.drill.exec.expr.fn.FunctionGenerationHelper;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.physical.config.TopN;
 import org.apache.drill.exec.physical.impl.sort.RecordBatchData;
@@ -48,9 +50,8 @@ import org.apache.drill.exec.record.AbstractRecordBatch;
 import org.apache.drill.exec.record.BatchSchema;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
 import org.apache.drill.exec.record.ExpandableHyperContainer;
-import org.apache.drill.exec.record.MaterializedField;
 import org.apache.drill.exec.record.RecordBatch;
-import org.apache.drill.exec.record.TransferPair;
+import org.apache.drill.exec.record.SchemaUtil;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorAccessible;
 import org.apache.drill.exec.record.VectorContainer;
@@ -60,20 +61,14 @@ import org.apache.drill.exec.record.selection.SelectionVector2;
 import org.apache.drill.exec.record.selection.SelectionVector4;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.complex.AbstractContainerVector;
-import org.eigenbase.rel.RelFieldCollation.Direction;
-import org.eigenbase.rel.RelFieldCollation.NullDirection;
 
 import com.google.common.base.Stopwatch;
-import com.google.common.collect.Lists;
 import com.sun.codemodel.JConditional;
 import com.sun.codemodel.JExpr;
 
 public class TopNBatch extends AbstractRecordBatch<TopN> {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(TopNBatch.class);
 
-  private static final long MAX_SORT_BYTES = 1L * 1024 * 1024 * 1024;
-  public static final long ALLOCATOR_INITIAL_RESERVATION = 1*1024*1024;
-  public static final long ALLOCATOR_MAX_RESERVATION = 20L*1000*1000*1000;
   private  final int batchPurgeThreshold;
 
   public final MappingSet MAIN_MAPPING = new MappingSet( (String) null, null, ClassGenerator.DEFAULT_SCALAR_MAP, ClassGenerator.DEFAULT_SCALAR_MAP);
@@ -83,16 +78,15 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
 
   private final RecordBatch incoming;
   private BatchSchema schema;
+  private boolean schemaChanged = false;
   private PriorityQueue priorityQueue;
   private TopN config;
   SelectionVector4 sv4;
   private long countSincePurge;
   private int batchCount;
   private Copier copier;
-  private boolean schemaBuilt = false;
   private boolean first = true;
   private int recordCount = 0;
-  private boolean stop;
 
   public TopNBatch(TopN popConfig, FragmentContext context, RecordBatch incoming) throws OutOfMemoryException {
     super(popConfig, context);
@@ -117,17 +111,17 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
   }
 
   @Override
-  public void cleanup() {
+  public void close() {
     if (sv4 != null) {
       sv4.clear();
     }
     if (priorityQueue != null) {
       priorityQueue.cleanup();
     }
-    super.cleanup();
-    incoming.cleanup();
+    super.close();
   }
 
+  @Override
   public void buildSchema() throws SchemaChangeException {
     VectorContainer c = new VectorContainer(oContext);
     IterOutcome outcome = next(incoming);
@@ -152,9 +146,14 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
         }
         container.buildSchema(SelectionVectorMode.NONE);
         container.setRecordCount(0);
+
         return;
       case STOP:
-        stop = true;
+        state = BatchState.STOP;
+        return;
+      case OUT_OF_MEMORY:
+        state = BatchState.OUT_OF_MEMORY;
+        return;
       case NONE:
         state = BatchState.DONE;
       default:
@@ -164,6 +163,7 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
 
   @Override
   public IterOutcome innerNext() {
+    recordCount = 0;
     if (state == BatchState.DONE) {
       return IterOutcome.NONE;
     }
@@ -180,8 +180,7 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
 
     try{
       outer: while (true) {
-        Stopwatch watch = new Stopwatch();
-        watch.start();
+        Stopwatch watch = Stopwatch.createStarted();
         IterOutcome upstream;
         if (first) {
           upstream = IterOutcome.OK_NEW_SCHEMA;
@@ -199,15 +198,23 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
           break outer;
         case NOT_YET:
           throw new UnsupportedOperationException();
+        case OUT_OF_MEMORY:
         case STOP:
           return upstream;
         case OK_NEW_SCHEMA:
           // only change in the case that the schema truly changes.  Artificial schema changes are ignored.
           if (!incoming.getSchema().equals(schema)) {
             if (schema != null) {
-              throw new UnsupportedOperationException("Sort doesn't currently support sorts with changing schemas.");
+              if (!unionTypeEnabled) {
+                throw new UnsupportedOperationException("Sort doesn't currently support sorts with changing schemas.");
+              } else {
+                this.schema = SchemaUtil.mergeSchemas(this.schema, incoming.getSchema());
+                purgeAndResetPriorityQueue();
+                this.schemaChanged = true;
+              }
+            } else {
+              this.schema = incoming.getSchema();
             }
-            this.schema = incoming.getSchema();
           }
           // fall through.
         case OK:
@@ -219,16 +226,30 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
           }
           countSincePurge += incoming.getRecordCount();
           batchCount++;
-          RecordBatchData batch = new RecordBatchData(incoming);
-          batch.canonicalize();
-          if (priorityQueue == null) {
-            priorityQueue = createNewPriorityQueue(context, config.getOrderings(), new ExpandableHyperContainer(batch.getContainer()), MAIN_MAPPING, LEFT_MAPPING, RIGHT_MAPPING);
+          RecordBatchData batch;
+          if (schemaChanged) {
+            batch = new RecordBatchData(SchemaUtil.coerceContainer(incoming, this.schema, oContext), oContext.getAllocator());
+          } else {
+            batch = new RecordBatchData(incoming, oContext.getAllocator());
           }
-          priorityQueue.add(context, batch);
-          if (countSincePurge > config.getLimit() && batchCount > batchPurgeThreshold) {
-            purge();
-            countSincePurge = 0;
-            batchCount = 0;
+          boolean success = false;
+          try {
+            batch.canonicalize();
+            if (priorityQueue == null) {
+              assert !schemaChanged;
+              priorityQueue = createNewPriorityQueue(context, config.getOrderings(), new ExpandableHyperContainer(batch.getContainer()), MAIN_MAPPING, LEFT_MAPPING, RIGHT_MAPPING);
+            }
+            priorityQueue.add(context, batch);
+            if (countSincePurge > config.getLimit() && batchCount > batchPurgeThreshold) {
+              purge();
+              countSincePurge = 0;
+              batchCount = 0;
+            }
+            success = true;
+          } finally {
+            if (!success) {
+              batch.clear();
+            }
           }
           break;
         default:
@@ -250,7 +271,6 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
         container.add(w.getValueVectors());
       }
       container.buildSchema(BatchSchema.SelectionVectorMode.FOUR_BYTE);
-
       recordCount = sv4.getCount();
       return IterOutcome.OK_NEW_SCHEMA;
 
@@ -263,15 +283,14 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
   }
 
   private void purge() throws SchemaChangeException {
-    Stopwatch watch = new Stopwatch();
-    watch.start();
+    Stopwatch watch = Stopwatch.createStarted();
     VectorContainer c = priorityQueue.getHyperBatch();
     VectorContainer newContainer = new VectorContainer(oContext);
     SelectionVector4 selectionVector4 = priorityQueue.getHeapSv4();
     SimpleRecordBatch batch = new SimpleRecordBatch(c, selectionVector4, context);
     SimpleRecordBatch newBatch = new SimpleRecordBatch(newContainer, null, context);
     if (copier == null) {
-      copier = RemovingRecordBatch.getGenerated4Copier(batch, context, oContext.getAllocator(),  newContainer, newBatch);
+      copier = RemovingRecordBatch.getGenerated4Copier(batch, context, oContext.getAllocator(),  newContainer, newBatch, null);
     } else {
       for (VectorWrapper<?> i : batch) {
 
@@ -280,27 +299,31 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
       }
       copier.setupRemover(context, batch, newBatch);
     }
-    SortRecordBatchBuilder builder = new SortRecordBatchBuilder(oContext.getAllocator(), MAX_SORT_BYTES);
-    do {
-      int count = selectionVector4.getCount();
-      int copiedRecords = copier.copyRecords(0, count);
-      assert copiedRecords == count;
-      for (VectorWrapper<?> v : newContainer) {
-        ValueVector.Mutator m = v.getValueVector().getMutator();
-        m.setValueCount(count);
-      }
-      newContainer.buildSchema(BatchSchema.SelectionVectorMode.NONE);
-      newContainer.setRecordCount(count);
-      builder.add(newBatch);
-    } while (selectionVector4.next());
-    selectionVector4.clear();
-    c.clear();
-    VectorContainer newQueue = new VectorContainer();
-    builder.canonicalize();
-    builder.build(context, newQueue);
-    priorityQueue.resetQueue(newQueue, builder.getSv4().createNewWrapperCurrent());
-    builder.getSv4().clear();
-    selectionVector4.clear();
+    SortRecordBatchBuilder builder = new SortRecordBatchBuilder(oContext.getAllocator());
+    try {
+      do {
+        int count = selectionVector4.getCount();
+        int copiedRecords = copier.copyRecords(0, count);
+        assert copiedRecords == count;
+        for (VectorWrapper<?> v : newContainer) {
+          ValueVector.Mutator m = v.getValueVector().getMutator();
+          m.setValueCount(count);
+        }
+        newContainer.buildSchema(BatchSchema.SelectionVectorMode.NONE);
+        newContainer.setRecordCount(count);
+        builder.add(newBatch);
+      } while (selectionVector4.next());
+      selectionVector4.clear();
+      c.clear();
+      VectorContainer newQueue = new VectorContainer();
+      builder.canonicalize();
+      builder.build(context, newQueue);
+      priorityQueue.resetQueue(newQueue, builder.getSv4().createNewWrapperCurrent());
+      builder.getSv4().clear();
+      selectionVector4.clear();
+    } finally {
+      DrillAutoCloseables.closeNoChecked(builder);
+    }
     logger.debug("Took {} us to purge", watch.elapsed(TimeUnit.MICROSECONDS));
   }
 
@@ -314,7 +337,7 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
     for (Ordering od : orderings) {
       // first, we rewrite the evaluation stack for each side of the comparison.
       ErrorCollector collector = new ErrorCollectorImpl();
-      final LogicalExpression expr = ExpressionTreeMaterializer.materialize(od.getExpr(), batch, collector, context.getFunctionRegistry());
+      final LogicalExpression expr = ExpressionTreeMaterializer.materialize(od.getExpr(), batch, collector, context.getFunctionRegistry(), unionTypeEnabled);
       if (collector.hasErrors()) {
         throw new SchemaChangeException("Failure while materializing expression. " + collector.toErrorString());
       }
@@ -345,6 +368,55 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
     PriorityQueue q = context.getImplementationClass(cg);
     q.init(config.getLimit(), context, oContext.getAllocator(), schema.getSelectionVectorMode() == BatchSchema.SelectionVectorMode.TWO_BYTE);
     return q;
+  }
+
+  /**
+   * Handle schema changes during execution.
+   * 1. Purge existing batches
+   * 2. Promote newly created container for new schema.
+   * 3. Recreate priority queue and reset with coerced container.
+   * @throws SchemaChangeException
+   */
+  public void purgeAndResetPriorityQueue() throws SchemaChangeException, ClassTransformationException, IOException {
+    final Stopwatch watch = Stopwatch.createStarted();
+    final VectorContainer c = priorityQueue.getHyperBatch();
+    final VectorContainer newContainer = new VectorContainer(oContext);
+    final SelectionVector4 selectionVector4 = priorityQueue.getHeapSv4();
+    final SimpleRecordBatch batch = new SimpleRecordBatch(c, selectionVector4, context);
+    final SimpleRecordBatch newBatch = new SimpleRecordBatch(newContainer, null, context);
+    copier = RemovingRecordBatch.getGenerated4Copier(batch, context, oContext.getAllocator(),  newContainer, newBatch, null);
+    SortRecordBatchBuilder builder = new SortRecordBatchBuilder(oContext.getAllocator());
+    try {
+      do {
+        final int count = selectionVector4.getCount();
+        final int copiedRecords = copier.copyRecords(0, count);
+        assert copiedRecords == count;
+        for (VectorWrapper<?> v : newContainer) {
+          ValueVector.Mutator m = v.getValueVector().getMutator();
+          m.setValueCount(count);
+        }
+        newContainer.buildSchema(BatchSchema.SelectionVectorMode.NONE);
+        newContainer.setRecordCount(count);
+        builder.add(newBatch);
+      } while (selectionVector4.next());
+      selectionVector4.clear();
+      c.clear();
+      final VectorContainer oldSchemaContainer = new VectorContainer(oContext);
+      builder.canonicalize();
+      builder.build(context, oldSchemaContainer);
+      oldSchemaContainer.setRecordCount(builder.getSv4().getCount());
+      final VectorContainer newSchemaContainer =  SchemaUtil.coerceContainer(oldSchemaContainer, this.schema, oContext);
+      // Canonicalize new container since we canonicalize incoming batches before adding to queue.
+      final VectorContainer canonicalizedContainer = VectorContainer.canonicalize(newSchemaContainer);
+      canonicalizedContainer.buildSchema(SelectionVectorMode.FOUR_BYTE);
+      priorityQueue.cleanup();
+      priorityQueue = createNewPriorityQueue(context, config.getOrderings(), canonicalizedContainer, MAIN_MAPPING, LEFT_MAPPING, RIGHT_MAPPING);
+      priorityQueue.resetQueue(canonicalizedContainer, builder.getSv4().createNewWrapperCurrent());
+    } finally {
+      builder.clear();
+      builder.close();
+    }
+    logger.debug("Took {} us to purge and recreate queue for new schema", watch.elapsed(TimeUnit.MICROSECONDS));
   }
 
   @Override
@@ -421,10 +493,6 @@ public class TopNBatch extends AbstractRecordBatch<TopN> {
     @Override
     public WritableBatch getWritableBatch() {
       throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public void cleanup() {
     }
 
     @Override

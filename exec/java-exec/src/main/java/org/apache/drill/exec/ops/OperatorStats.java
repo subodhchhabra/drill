@@ -17,13 +17,20 @@
  */
 package org.apache.drill.exec.ops;
 
+import java.util.Iterator;
+
 import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.proto.UserBitShared.MetricValue;
 import org.apache.drill.exec.proto.UserBitShared.OperatorProfile;
+import org.apache.drill.exec.proto.UserBitShared.OperatorProfile.Builder;
 import org.apache.drill.exec.proto.UserBitShared.StreamProfile;
 
-import com.carrotsearch.hppc.IntDoubleOpenHashMap;
-import com.carrotsearch.hppc.IntLongOpenHashMap;
+import com.carrotsearch.hppc.IntDoubleHashMap;
+import com.carrotsearch.hppc.IntLongHashMap;
+import com.carrotsearch.hppc.cursors.IntDoubleCursor;
+import com.carrotsearch.hppc.cursors.IntLongCursor;
+import com.carrotsearch.hppc.procedures.IntDoubleProcedure;
+import com.carrotsearch.hppc.procedures.IntLongProcedure;
 
 public class OperatorStats {
   static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(OperatorStats.class);
@@ -32,8 +39,8 @@ public class OperatorStats {
   protected final int operatorType;
   private final BufferAllocator allocator;
 
-  private IntLongOpenHashMap longMetrics = new IntLongOpenHashMap();
-  private IntDoubleOpenHashMap doubleMetrics = new IntDoubleOpenHashMap();
+  private IntLongHashMap longMetrics = new IntLongHashMap();
+  private IntDoubleHashMap doubleMetrics = new IntDoubleHashMap();
 
   public long[] recordsReceivedByInput;
   public long[] batchesReceivedByInput;
@@ -53,9 +60,31 @@ public class OperatorStats {
   private long waitMark;
 
   private long schemas;
+  private int inputCount;
 
   public OperatorStats(OpProfileDef def, BufferAllocator allocator){
     this(def.getOperatorId(), def.getOperatorType(), def.getIncomingCount(), allocator);
+  }
+
+  /**
+   * Copy constructor to be able to create a copy of existing stats object shell and use it independently
+   * this is useful if stats have to be updated in different threads, since it is not really
+   * possible to update such stats as waitNanos, setupNanos and processingNanos across threads
+   * @param original - OperatorStats object to create a copy from
+   * @param isClean - flag to indicate whether to start with clean state indicators or inherit those from original object
+   */
+  public OperatorStats(OperatorStats original, boolean isClean) {
+    this(original.operatorId, original.operatorType, original.inputCount, original.allocator);
+
+    if ( !isClean ) {
+      inProcessing = original.inProcessing;
+      inSetup = original.inSetup;
+      inWait = original.inWait;
+
+      processingMark = original.processingMark;
+      setupMark = original.setupMark;
+      waitMark = original.waitMark;
+    }
   }
 
   private OperatorStats(int operatorId, int operatorType, int inputCount, BufferAllocator allocator) {
@@ -63,6 +92,7 @@ public class OperatorStats {
     this.allocator = allocator;
     this.operatorId = operatorId;
     this.operatorType = operatorType;
+    this.inputCount = inputCount;
     this.recordsReceivedByInput = new long[inputCount];
     this.batchesReceivedByInput = new long[inputCount];
     this.schemaCountByInput = new long[inputCount];
@@ -71,6 +101,44 @@ public class OperatorStats {
   private String assertionError(String msg){
     return String.format("Failure while %s for operator id %d. Currently have states of processing:%s, setup:%s, waiting:%s.", msg, operatorId, inProcessing, inSetup, inWait);
   }
+  /**
+   * OperatorStats merger - to merge stats from other OperatorStats
+   * this is needed in case some processing is multithreaded that needs to have
+   * separate OperatorStats to deal with
+   * WARN - this will only work for metrics that can be added
+   * @param from - OperatorStats from where to merge to "this"
+   * @return OperatorStats - for convenience so one can merge multiple stats in one go
+   */
+  public OperatorStats mergeMetrics(OperatorStats from) {
+    final IntLongHashMap fromMetrics = from.longMetrics;
+
+    final Iterator<IntLongCursor> iter = fromMetrics.iterator();
+    while (iter.hasNext()) {
+      final IntLongCursor next = iter.next();
+      longMetrics.putOrAdd(next.key, next.value, next.value);
+    }
+
+    final IntDoubleHashMap fromDMetrics = from.doubleMetrics;
+    final Iterator<IntDoubleCursor> iterD = fromDMetrics.iterator();
+
+    while (iterD.hasNext()) {
+      final IntDoubleCursor next = iterD.next();
+      doubleMetrics.putOrAdd(next.key, next.value, next.value);
+    }
+    return this;
+  }
+
+  /**
+   * Clear stats
+   */
+  public void clear() {
+    processingNanos = 0l;
+    setupNanos = 0l;
+    waitNanos = 0l;
+    longMetrics.clear();
+    doubleMetrics.clear();
+  }
+
   public void startSetup() {
     assert !inSetup  : assertionError("starting setup");
     stopProcessing();
@@ -151,19 +219,45 @@ public class OperatorStats {
     }
   }
 
+  private class LongProc implements IntLongProcedure {
+
+    private final OperatorProfile.Builder builder;
+
+    public LongProc(Builder builder) {
+      super();
+      this.builder = builder;
+    }
+
+    @Override
+    public void apply(int key, long value) {
+      builder.addMetric(MetricValue.newBuilder().setMetricId(key).setLongValue(value));
+    }
+
+  }
+
   public void addLongMetrics(OperatorProfile.Builder builder) {
-    for(int i =0; i < longMetrics.allocated.length; i++){
-      if(longMetrics.allocated[i]){
-        builder.addMetric(MetricValue.newBuilder().setMetricId(longMetrics.keys[i]).setLongValue(longMetrics.values[i]));
-      }
+    if (longMetrics.size() > 0) {
+      longMetrics.forEach(new LongProc(builder));
     }
   }
 
+  private class DoubleProc implements IntDoubleProcedure {
+    private final OperatorProfile.Builder builder;
+
+    public DoubleProc(Builder builder) {
+      super();
+      this.builder = builder;
+    }
+
+    @Override
+    public void apply(int key, double value) {
+      builder.addMetric(MetricValue.newBuilder().setMetricId(key).setDoubleValue(value));
+    }
+
+  }
   public void addDoubleMetrics(OperatorProfile.Builder builder) {
-    for(int i =0; i < doubleMetrics.allocated.length; i++){
-      if(doubleMetrics.allocated[i]){
-        builder.addMetric(MetricValue.newBuilder().setMetricId(doubleMetrics.keys[i]).setDoubleValue(doubleMetrics.values[i]));
-      }
+    if (doubleMetrics.size() > 0) {
+      doubleMetrics.forEach(new DoubleProc(builder));
     }
   }
 
@@ -181,6 +275,22 @@ public class OperatorStats {
 
   public void setDoubleStat(MetricDef metric, double value){
     doubleMetrics.put(metric.metricId(), value);
+  }
+
+  public long getWaitNanos() {
+    return waitNanos;
+  }
+
+  /**
+   * Adjust waitNanos based on client calculations
+   * @param waitNanosOffset - could be negative as well as positive
+   */
+  public void adjustWaitNanos(long waitNanosOffset) {
+    this.waitNanos += waitNanosOffset;
+  }
+
+  public long getProcessingNanos() {
+    return processingNanos;
   }
 
 }

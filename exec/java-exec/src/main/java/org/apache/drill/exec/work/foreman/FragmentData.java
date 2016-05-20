@@ -22,48 +22,95 @@ import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
 import org.apache.drill.exec.proto.ExecProtos.FragmentHandle;
 import org.apache.drill.exec.proto.UserBitShared.FragmentState;
 import org.apache.drill.exec.proto.UserBitShared.MinorFragmentProfile;
+import org.apache.drill.exec.proto.UserBitShared.OperatorProfile;
 
 public class FragmentData {
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FragmentData.class);
+
   private final boolean isLocal;
   private volatile FragmentStatus status;
-  private volatile long lastStatusUpdate = 0;
+  private volatile long lastStatusUpdate = System.currentTimeMillis();
+  private volatile long lastProgress = System.currentTimeMillis();
   private final DrillbitEndpoint endpoint;
 
-  public FragmentData(FragmentHandle handle, DrillbitEndpoint endpoint, boolean isLocal) {
-    super();
-    MinorFragmentProfile f = MinorFragmentProfile.newBuilder() //
-        .setState(FragmentState.SENDING) //
-        .setMinorFragmentId(handle.getMinorFragmentId()) //
-        .setEndpoint(endpoint) //
-        .build();
-    this.status = FragmentStatus.newBuilder().setHandle(handle).setProfile(f).build();
+  public FragmentData(final FragmentHandle handle, final DrillbitEndpoint endpoint, final boolean isLocal) {
     this.endpoint = endpoint;
     this.isLocal = isLocal;
+    final MinorFragmentProfile f = MinorFragmentProfile.newBuilder()
+        .setState(FragmentState.SENDING)
+        .setMinorFragmentId(handle.getMinorFragmentId())
+        .setEndpoint(endpoint)
+        .build();
+    status = FragmentStatus.newBuilder()
+        .setHandle(handle)
+        .setProfile(f)
+        .build();
   }
 
-  public void setStatus(FragmentStatus status){
-    this.status = status;
-    lastStatusUpdate = System.currentTimeMillis();
+  /**
+   * Update the status for this fragment. Also records last update and last progress time.
+   * @param newStatus Updated status
+   */
+  public void setStatus(final FragmentStatus newStatus) {
+    final long time = System.currentTimeMillis();
+    lastStatusUpdate = time;
+    if (madeProgress(status, newStatus)) {
+      lastProgress = time;
+    }
+    status = newStatus;
   }
 
-  public FragmentStatus getStatus() {
-    return status;
+  public FragmentState getState() {
+    return status.getProfile().getState();
+  }
+
+  public MinorFragmentProfile getProfile() {
+    return status
+        .getProfile()
+        .toBuilder()
+        .setLastUpdate(lastStatusUpdate)
+        .setLastProgress(lastProgress)
+        .build();
   }
 
   public boolean isLocal() {
     return isLocal;
   }
 
-  public long getLastStatusUpdate() {
-    return lastStatusUpdate;
-  }
-
   public DrillbitEndpoint getEndpoint() {
     return endpoint;
   }
 
-  public FragmentHandle getHandle(){
+  public FragmentHandle getHandle() {
     return status.getHandle();
+  }
+
+  private boolean madeProgress(final FragmentStatus prev, final FragmentStatus cur) {
+    final MinorFragmentProfile previous = prev.getProfile();
+    final MinorFragmentProfile current = cur.getProfile();
+
+    if (previous.getState() != current.getState()) {
+      return true;
+    }
+
+    if (previous.getOperatorProfileCount() != current.getOperatorProfileCount()) {
+      return true;
+    }
+
+    for(int i =0; i < current.getOperatorProfileCount(); i++){
+      if (madeProgress(previous.getOperatorProfile(i), current.getOperatorProfile(i))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private boolean madeProgress(final OperatorProfile prev, final OperatorProfile cur) {
+    return prev.getInputProfileCount() != cur.getInputProfileCount()
+        || !prev.getInputProfileList().equals(cur.getInputProfileList())
+        || prev.getMetricCount() != cur.getMetricCount()
+        || !prev.getMetricList().equals(cur.getMetricList());
   }
 
   @Override
@@ -71,7 +118,4 @@ public class FragmentData {
     return "FragmentData [isLocal=" + isLocal + ", status=" + status + ", lastStatusUpdate=" + lastStatusUpdate
         + ", endpoint=" + endpoint + "]";
   }
-
-
-
 }

@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.drill.common.util.TestTools;
 import org.apache.drill.jdbc.Driver;
-import org.apache.drill.jdbc.JdbcTest;
+import org.apache.drill.jdbc.JdbcTestBase;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -40,7 +40,7 @@ import org.junit.runner.Description;
 
 import com.google.common.base.Stopwatch;
 
-public class JdbcTestActionBase extends JdbcTest {
+public class JdbcTestActionBase extends JdbcTestBase {
   // Set a timeout unless we're debugging.
   @Rule
   public TestRule TIMEOUT = TestTools.getTimeoutRule(40000);
@@ -71,7 +71,7 @@ public class JdbcTestActionBase extends JdbcTest {
 
   protected void testAction(JdbcAction action, long rowcount) throws Exception {
     int rows = 0;
-    Stopwatch watch = new Stopwatch().start();
+    Stopwatch watch = Stopwatch.createStarted();
     ResultSet r = action.getResult(connection);
     boolean first = true;
     while (r.next()) {
@@ -116,7 +116,7 @@ public class JdbcTestActionBase extends JdbcTest {
 
   @BeforeClass
   public static void openClient() throws Exception {
-    connection = DriverManager.getConnection("jdbc:drill:zk=local", null);
+    connection = DriverManager.getConnection("jdbc:drill:zk=local", JdbcAssert.getDefaultProperties());
   }
 
   @AfterClass

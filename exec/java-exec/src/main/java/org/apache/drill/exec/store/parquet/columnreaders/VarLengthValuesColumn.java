@@ -25,11 +25,11 @@ import org.apache.drill.common.exceptions.ExecutionSetupException;
 import org.apache.drill.exec.vector.ValueVector;
 import org.apache.drill.exec.vector.VariableWidthVector;
 
-import parquet.column.ColumnDescriptor;
-import parquet.format.Encoding;
-import parquet.format.SchemaElement;
-import parquet.hadoop.metadata.ColumnChunkMetaData;
-import parquet.io.api.Binary;
+import org.apache.parquet.column.ColumnDescriptor;
+import org.apache.parquet.format.Encoding;
+import org.apache.parquet.format.SchemaElement;
+import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+import org.apache.parquet.io.api.Binary;
 
 public abstract class VarLengthValuesColumn<V extends ValueVector> extends VarLengthColumn {
 
@@ -56,7 +56,7 @@ public abstract class VarLengthValuesColumn<V extends ValueVector> extends VarLe
   protected void readField(long recordToRead) {
     dataTypeLengthInBits = variableWidthVector.getAccessor().getValueLength(valuesReadInCurrentPass);
     // again, I am re-purposing the unused field here, it is a length n BYTES, not bits
-    boolean success = setSafe((int) valuesReadInCurrentPass, pageReader.pageDataByteArray,
+    boolean success = setSafe((int) valuesReadInCurrentPass, pageReader.pageData,
         (int) pageReader.readPosInBytes + 4, dataTypeLengthInBits);
     assert success;
     updatePosition();
@@ -91,10 +91,9 @@ public abstract class VarLengthValuesColumn<V extends ValueVector> extends VarLe
       currDictValToWrite = currLengthDeterminingDictVal;
       // re-purposing  this field here for length in BYTES to prevent repetitive multiplication/division
       dataTypeLengthInBits = currLengthDeterminingDictVal.length();
-    }
-    else {
+    } else {
       // re-purposing  this field here for length in BYTES to prevent repetitive multiplication/division
-      dataTypeLengthInBits = pageReader.pageDataByteArray.getInt((int) pageReader.readyToReadPosInBytes);
+      dataTypeLengthInBits = pageReader.pageData.getInt((int) pageReader.readyToReadPosInBytes);
     }
 
     // this should not fail

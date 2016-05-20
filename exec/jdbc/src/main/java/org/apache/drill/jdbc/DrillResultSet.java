@@ -17,213 +17,540 @@
  */
 package org.apache.drill.jdbc;
 
-import java.sql.ResultSetMetaData;
+import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.TimeZone;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
-import net.hydromatic.avatica.AvaticaPrepareResult;
-import net.hydromatic.avatica.AvaticaResultSet;
-import net.hydromatic.avatica.AvaticaStatement;
 
-import org.apache.drill.exec.client.DrillClient;
-import org.apache.drill.exec.proto.UserBitShared.QueryId;
-import org.apache.drill.exec.proto.UserBitShared.QueryResult.QueryState;
-import org.apache.drill.exec.proto.UserBitShared.QueryType;
-import org.apache.drill.exec.proto.helper.QueryIdHelper;
-import org.apache.drill.exec.record.RecordBatchLoader;
-import org.apache.drill.exec.rpc.RpcException;
-import org.apache.drill.exec.rpc.user.ConnectionThrottle;
-import org.apache.drill.exec.rpc.user.QueryResultBatch;
-import org.apache.drill.exec.rpc.user.UserResultsListener;
+/**
+ * Drill-specific {@link ResultSet}.
+ * @see #unwrap
+ */
+public interface DrillResultSet extends ResultSet  {
 
-import com.google.common.collect.Queues;
+  /**
+   * Gets the ID of the associated query (the query whose results this ResultSet
+   * presents).
+   *
+   * @throws  SQLException  if this method is called on a closed result set
+   */
+  String getQueryId() throws SQLException;
 
-public class DrillResultSet extends AvaticaResultSet {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(DrillResultSet.class);
-
-  SchemaChangeListener changeListener;
-  final Listener listener = new Listener();
-  private volatile QueryId queryId;
-  private final DrillClient client;
-  final RecordBatchLoader currentBatch;
-  final DrillCursor cursor;
-
-  public DrillResultSet(AvaticaStatement statement, AvaticaPrepareResult prepareResult,
-      ResultSetMetaData resultSetMetaData, TimeZone timeZone) {
-    super(statement, prepareResult, resultSetMetaData, timeZone);
-    DrillConnection c = (DrillConnection) statement.getConnection();
-    DrillClient client = c.getClient();
-    // DrillClient client, DrillStatement statement) {
-    currentBatch = new RecordBatchLoader(client.getAllocator());
-    this.client = client;
-    cursor = new DrillCursor(this);
-  }
-
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   Accepts {@code DrillResultSet.class}.
+   * </p>
+   */
   @Override
-  protected void cancel() {
-    cleanup();
-    close();
-  }
+  <T> T unwrap(Class<T> iface) throws SQLException;
 
-  synchronized void cleanup() {
-    if (queryId != null && !listener.completed) {
-      client.cancelQuery(queryId);
-    }
-    listener.close();
-  }
-
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   Returns true for {@code DrillResultSet.class}.
+   * </p>
+   */
   @Override
-  public boolean next() throws SQLException {
-    // Next may be called after close has been called (for example after a user cancel) which in turn
-    // sets the cursor to null. So we must check before we call next.
-    // TODO: handle next() after close is called in the Avatica code.
-    if(super.cursor!=null){
-      return super.next();
-    }else{
-      return false;
-    }
+  boolean isWrapperFor(Class<?> iface) throws SQLException;
 
-  }
+  // Note:  The commented-out methods are left in to make it easier to match
+  // the method order from ResultSet when adding method declarations at this
+  // level (e.g., to document Drill-specific behavior for more) in the future
+  // (so the resulting documentation page matches the order in
+  // java.sql.ResultSet's page).
 
+  // (Temporary, re matching ResultSet's method order:
+  // next()
+  // close()
+  // wasNull()
+  // )
 
-  @Override protected DrillResultSet execute() throws SQLException{
-    // Call driver's callback. It is permitted to throw a RuntimeException.
-    DrillConnectionImpl connection = (DrillConnectionImpl) statement.getConnection();
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from all types.
+   * </p>
+   */
+  @Override
+  String getString(int columnIndex) throws SQLException;
 
-    connection.getClient().runQuery(QueryType.SQL, this.prepareResult.getSql(), listener);
-    connection.getDriver().handler.onStatementExecute(statement, null);
+  // (Temporary, re matching ResultSet's method order:)
+  // getBoolean(int)
+  // )
 
-    super.execute();
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code SMALLINT} ({@code short}),
+   *       {@code INTEGER} ({@code int}), and
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code DOUBLE PRECISION} ({@code double}), and
+   *       {@code FLOAT} ({@code float} or {@code double})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code byte} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code byte}
+   */
+  @Override
+  byte getByte(int columnIndex) throws SQLConversionOverflowException,
+                                       SQLException;
 
-    // don't return with metadata until we've achieved at least one return message.
-    try {
-      listener.latch.await();
-      cursor.next();
-    } catch (InterruptedException e) {
-    }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code INTEGER} ({@code int}), and
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code DOUBLE PRECISION} ({@code double}), and
+   *       {@code FLOAT} ({@code float} or {@code double})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code short} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code short}
+   */
+  @Override
+  short getShort(int columnIndex) throws SQLConversionOverflowException,
+                                         SQLException;
 
-    return this;
-  }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code SMALLINT} ({@code short}), and
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code DOUBLE PRECISION} ({@code double}), and
+   *       {@code FLOAT} ({@code float} or {@code double})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code int} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code int}
+   */
+  @Override
+  int getInt(int columnIndex) throws SQLConversionOverflowException,
+                                     SQLException;
 
-  public String getQueryId() {
-    if (queryId != null) {
-      return QueryIdHelper.getQueryId(queryId);
-    } else {
-      return null;
-    }
-  }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code SMALLINT} ({@code short}), and
+   *       {@code INTEGER} ({@code int})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code DOUBLE PRECISION} ({@code double}), and
+   *       {@code FLOAT} ({@code float} or {@code double})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code long} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code long}
+   */
+  @Override
+  long getLong(int columnIndex) throws SQLConversionOverflowException,
+                                       SQLException;
 
-  class Listener implements UserResultsListener {
-    private static final int MAX = 100;
-    private volatile RpcException ex;
-    volatile boolean completed = false;
-    private volatile boolean autoread = true;
-    private volatile ConnectionThrottle throttle;
-    private volatile boolean closed = false;
-    private CountDownLatch latch = new CountDownLatch(1);
-    private AtomicBoolean receivedMessage = new AtomicBoolean(false);
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code SMALLINT} ({@code short}), and
+   *       {@code INTEGER} ({@code int}),
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code DOUBLE PRECISION} ({@code double}) and
+   *       {@code FLOAT} (when {@code double})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code float} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code float}
+   */
+  @Override
+  float getFloat(int columnIndex) throws SQLConversionOverflowException,
+                                         SQLException;
 
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code SMALLINT} ({@code short}),
+   *       {@code INTEGER} ({@code int}), and
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code FLOAT} (when {@code float})
+   *       </li>
+   *   <li>{@code DECIMAL} ({@code BigDecimal})
+   *       </li>
+   * </ul>
+   * <p>
+   *   Conversion throws {@link SQLConversionOverflowException} for a source
+   *   value whose magnitude is outside the range of {@code double} values.
+   * </p>
+   * @throws  SQLConversionOverflowException  if a source value was too large
+   *   to convert to {@code double}
+   */
+  @Override
+  double getDouble(int columnIndex) throws SQLConversionOverflowException,
+                                           SQLException;
 
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from types:
+   * </p>
+   * <ul>
+   *   <li>{@code TINYINT} ({@code byte}),
+   *       {@code SMALLINT} ({@code short}),
+   *       {@code INTEGER} ({@code int}), and
+   *       {@code BIGINT} ({@code long})
+   *       </li>
+   *   <li>{@code REAL} ({@code float}),
+   *       {@code DOUBLE PRECISION} ({@code double}), and
+   *       {@code FLOAT} ({@code float} or {@code double})
+   *       </li>
+   * </ul>
+   */
+  @Override
+  BigDecimal getBigDecimal(int columnIndex, int scale) throws SQLException;
 
-    final LinkedBlockingDeque<QueryResultBatch> queue = Queues.newLinkedBlockingDeque();
+  // (Temporary, re matching ResultSet's method order:)
+  // getBytes(int)
+  // getDate(int)
+  // getTime(int)
+  // getTimestamp(int)
+  // getAsciiStream(int)
+  // getUnicodeStream(int)
+  // getBinaryStream(int)
+  // )
 
-    private boolean releaseIfFirst() {
-      if (receivedMessage.compareAndSet(false, true)) {
-        latch.countDown();
-        return true;
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getString(int)}.
+   * </p>
+   */
+  @Override
+  String getString(String columnLabel) throws SQLException;
 
-      return false;
-    }
+  // (Temporary, re matching ResultSet's method order:)
+  // getBoolean(String)
+  // )
 
-    @Override
-    public void submissionFailed(RpcException ex) {
-      releaseIfFirst();
-      this.ex = ex;
-      completed = true;
-      close();
-      System.out.println("Query failed: " + ex.getMessage());
-    }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getByte(int)}.
+   * </p>
+   */
+  @Override
+  byte getByte(String columnLabel) throws SQLConversionOverflowException,
+                                          SQLException;
 
-    @Override
-    public void resultArrived(QueryResultBatch result, ConnectionThrottle throttle) {
-      logger.debug("Result arrived {}", result);
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getShort(int)}.
+   * </p>
+   */
+  @Override
+  short getShort(String columnLabel) throws SQLConversionOverflowException,
+                                            SQLException;
 
-      if (result.getHeader().hasQueryState() && result.getHeader().getQueryState() == QueryState.COMPLETED && result.getHeader().getRowCount() == 0) {
-        result.release();
-        return;
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getInt(int)}.
+   * </p>
+   */
+  @Override
+  int getInt(String columnLabel) throws SQLConversionOverflowException,
+                                        SQLException;
 
-      // if we're in a closed state, just release the message.
-      if (closed) {
-        result.release();
-        completed = true;
-        return;
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getLong(int)}.
+   * </p>
+   */
+  @Override
+  long getLong(String columnLabel) throws SQLConversionOverflowException,
+                                          SQLException;
 
-      // we're active, let's add to the queue.
-      queue.add(result);
-      if (queue.size() >= MAX - 1) {
-        throttle.setAutoRead(false);
-        this.throttle = throttle;
-        autoread = false;
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getFloat(int)}.
+   * </p>
+   */
+  @Override
+  float getFloat(String columnLabel) throws SQLConversionOverflowException,
+                                            SQLException;
 
-      if (result.getHeader().getIsLastChunk()) {
-        completed = true;
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getDouble(int)}.
+   * </p>
+   */
+  @Override
+  double getDouble(String columnLabel) throws SQLConversionOverflowException,
+                                              SQLException;
 
-      if (result.getHeader().getErrorCount() > 0) {
-        submissionFailed(new RpcException(String.format("%s", result.getHeader().getErrorList())));
-      }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getBigDecimal(int)}.
+   * </p>
+   */
+  @Override
+  BigDecimal getBigDecimal(String columnLabel, int scale) throws SQLException;
 
-      releaseIfFirst();
+  // (Temporary, re matching ResultSet's method order:)
+  // getBytes(String)
+  // getDate(String)
+  // getTime(String)
+  // getTimestamp(String)
+  // getAsciiStream(String)
+  // getUnicodeStream(String)
+  // getBinaryStream(String)
+  // getWarnings()
+  // clearWarnings()
+  // getCursorName()
+  // getMetaData()
+  // )
 
-    }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *    <strong>Drill: Conversions</strong>: Supports conversion from all types.
+   * </p>
+   */
+  @Override
+  Object getObject(int columnIndex) throws SQLException;
 
-    public QueryResultBatch getNext() throws RpcException, InterruptedException {
-      while (true) {
-        if (ex != null) {
-          throw ex;
-        }
-        if (completed && queue.isEmpty()) {
-          return null;
-        } else {
-          QueryResultBatch q = queue.poll(50, TimeUnit.MILLISECONDS);
-          if (q != null) {
-            if (!autoread && queue.size() < MAX / 2) {
-              autoread = true;
-              throttle.setAutoRead(true);
-              throttle = null;
-            }
-            return q;
-          }
-        }
-      }
-    }
+  /**
+   * {@inheritDoc}
+   * <p>
+   *   <strong>Drill</strong>:
+   *   For conversions, see {@link DrillResultSet#getObject(int)}.
+   * </p>
+   */
+  @Override
+  Object getObject(String columnLabel) throws SQLException;
 
-    void close() {
-      closed = true;
-      while (!queue.isEmpty()) {
-        QueryResultBatch qrb = queue.poll();
-        if (qrb != null && qrb.getData() != null) {
-          qrb.getData().release();
-        }
-      }
-      // close may be called before the first result is received and the main thread is blocked waiting
-      // for the result. In that case we want to unblock the main thread.
-      latch.countDown();
-      completed = true;
-    }
-
-    @Override
-    public void queryIdArrived(QueryId queryId) {
-      DrillResultSet.this.queryId = queryId;
-    }
-  }
+  // (Temporary, re matching ResultSet's method order:)
+  // findColumn(String)
+  // getCharacterStream(int)
+  // getCharacterStream(String)
+  // getBigDecimal(int)
+  // getBigDecimal(String)
+  // isBeforeFirst()
+  // isAfterLast()
+  // isFirst()
+  // isLast()
+  // beforeFirst()
+  // afterLast()
+  // first()
+  // last()
+  // getRow()
+  // absolute(int)
+  // relative(int)
+  // previous()
+  // setFetchDirection(int)
+  // getFetchDirection()
+  // setFetchSize(int)
+  // getFetchSize()
+  // getType()
+  // getConcurrency()
+  // rowUpdated()
+  // rowInserted()
+  // rowDeleted()
+  // updateNull(int)
+  // updateBoolean(int, boolean)
+  // updateByte(int, byte)
+  // updateShort(int, short)
+  // updateInt(int, int)
+  // updateLong(int, long)
+  // updateFloat(int, float)
+  // updateDouble(int, double)
+  // updateBigDecimal(int, BigDecimal)
+  // updateString(int, String)
+  // updateBytes(int, byte[])
+  // updateDate(int, Date)
+  // updateTime(int, Time)
+  // updateTimestamp(int, Timestamp)
+  // updateAsciiStream(int, InputStream, int)
+  // updateBinaryStream(int, InputStream, int)
+  // updateCharacterStream(int, Reader, int)
+  // updateObject(int, Object, int)
+  // updateObject(int, Object)
+  // updateNull(String)
+  // updateBoolean(String, boolean)
+  // updateByte(String, byte)
+  // updateShort(String, short)
+  // updateInt(String, int)
+  // updateLong(String, long)
+  // updateFloat(String, float)
+  // updateDouble(String, double)
+  // updateBigDecimal(String, BigDecimal)
+  // updateString(String, String)
+  // updateBytes(String, byte[])
+  // updateDate(String, Date)
+  // updateTime(String, Time)
+  // updateTimestamp(String, Timestamp)
+  // updateAsciiStream(String, InputStream, int)
+  // updateBinaryStream(String, InputStream, int)
+  // updateCharacterStream(String, Reader, int)
+  // updateObject(String, Object, int)
+  // updateObject(String, Object)
+  // insertRow()
+  // updateRow()
+  // deleteRow()
+  // refreshRow()
+  // cancelRowUpdates()
+  // moveToInsertRow()
+  // moveToCurrentRow()
+  // getStatement()
+  // getObject(int, Map<String, Class<?>>)
+  // getRef(int)
+  // getBlob(int)
+  // getClob(int)
+  // getArray(int)
+  // getObject(String, Map<String, Class<?>>)
+  // getRef(String)
+  // getBlob(String)
+  // getClob(String)
+  // getArray(String)
+  // getDate(int, Calendar)
+  // getDate(String, Calendar)
+  // getTime(int, Calendar)
+  // getTime(String, Calendar)
+  // getTimestamp(int, Calendar)
+  // getTimestamp(String, Calendar)
+  // getURL(int)
+  // getURL(String)
+  // updateRef(int, Ref)
+  // updateRef(String, Ref)
+  // updateBlob(int, Blob)
+  // updateBlob(String, Blob)
+  // updateClob(int, Clob)
+  // updateClob(String, Clob)
+  // updateArray(int, Array)
+  // updateArray(String, Array)
+  // getRowId(int)
+  // getRowId(String)
+  // updateRowId(int, RowId)
+  // updateRowId(String, RowId)
+  // getHoldability()
+  // isClosed()
+  // updateNString(int, String)
+  // updateNString(String, String)
+  // updateNClob(int, NClob)
+  // updateNClob(String, NClob)
+  // getNClob(int)
+  // getNClob(String)
+  // getSQLXML(int)
+  // getSQLXML(String)
+  // updateSQLXML(int, SQLXML)
+  // updateSQLXML(String, SQLXML)
+  // getNString(int)
+  // getNString(String)
+  // getNCharacterStream(int)
+  // getNCharacterStream(String)
+  // updateNCharacterStream(int, Reader, long)
+  // updateNCharacterStream(String, Reader, long)
+  // updateAsciiStream(int, InputStream, long)
+  // updateBinaryStream(int, InputStream, long)
+  // updateCharacterStream(int, Reader, long)
+  // updateAsciiStream(String, InputStream, long)
+  // updateBinaryStream(String, InputStream, long)
+  // updateCharacterStream(String, Reader, long)
+  // updateBlob(int, InputStream, long)
+  // updateBlob(String, InputStream, long)
+  // updateClob(int, Reader, long)
+  // updateClob(String, Reader, long)
+  // updateNClob(int, Reader, long)
+  // updateNClob(String, Reader, long)
+  // updateNCharacterStream(int, Reader)
+  // updateNCharacterStream(String, Reader)
+  // updateAsciiStream(int, InputStream)
+  // updateBinaryStream(int, InputStream)
+  // updateCharacterStream(int, Reader)
+  // updateAsciiStream(String, InputStream)
+  // updateBinaryStream(String, InputStream)
+  // updateCharacterStream(String, Reader)
+  // updateBlob(int, InputStream)
+  // updateBlob(String, InputStream)
+  // updateClob(int, Reader)
+  // updateClob(String, Reader)
+  // updateNClob(int, Reader)
+  // updateNClob(String, Reader)
+  // getObject(int, Class<T>)
+  // getObject(String, Class<T>)
+  // )
 
 }

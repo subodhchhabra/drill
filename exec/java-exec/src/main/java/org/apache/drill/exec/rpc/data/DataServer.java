@@ -17,14 +17,14 @@
  */
 package org.apache.drill.exec.rpc.data;
 
-import java.io.IOException;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.DrillBuf;
-import io.netty.buffer.UnsafeDirectLittleEndian;
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.util.concurrent.GenericFutureListener;
+
+import java.io.IOException;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.apache.drill.exec.exception.FragmentSetupException;
 import org.apache.drill.exec.memory.BufferAllocator;
@@ -44,7 +44,7 @@ import org.apache.drill.exec.rpc.ResponseSender;
 import org.apache.drill.exec.rpc.RpcException;
 import org.apache.drill.exec.rpc.control.WorkEventBus;
 import org.apache.drill.exec.server.BootStrapContext;
-import org.apache.drill.exec.util.Pointer;
+import org.apache.drill.exec.work.WorkManager.WorkerBee;
 import org.apache.drill.exec.work.fragment.FragmentManager;
 
 import com.google.protobuf.MessageLite;
@@ -55,13 +55,17 @@ public class DataServer extends BasicServer<RpcType, BitServerConnection> {
   private volatile ProxyCloseHandler proxyCloseHandler;
   private final BootStrapContext context;
   private final WorkEventBus workBus;
-  private final DataResponseHandler dataHandler;
+  private final WorkerBee bee;
 
-  public DataServer(BootStrapContext context, WorkEventBus workBus, DataResponseHandler dataHandler) {
-    super(DataRpcConfig.MAPPING, context.getAllocator().getUnderlyingAllocator(), context.getBitLoopGroup());
+  public DataServer(BootStrapContext context, BufferAllocator alloc, WorkEventBus workBus,
+      WorkerBee bee) {
+    super(
+        DataRpcConfig.getMapping(context.getConfig(), context.getExecutor()),
+        alloc.getAsByteBufAllocator(),
+        context.getBitLoopGroup());
     this.context = context;
     this.workBus = workBus;
-    this.dataHandler = dataHandler;
+    this.bee = bee;
   }
 
   @Override
@@ -70,13 +74,14 @@ public class DataServer extends BasicServer<RpcType, BitServerConnection> {
   }
 
   @Override
-  protected GenericFutureListener<ChannelFuture> getCloseHandler(BitServerConnection connection) {
-    this.proxyCloseHandler = new ProxyCloseHandler(super.getCloseHandler(connection));
+  protected GenericFutureListener<ChannelFuture> getCloseHandler(SocketChannel ch, BitServerConnection connection) {
+    this.proxyCloseHandler = new ProxyCloseHandler(super.getCloseHandler(ch, connection));
     return proxyCloseHandler;
   }
 
   @Override
-  public BitServerConnection initRemoteConnection(Channel channel) {
+  public BitServerConnection initRemoteConnection(SocketChannel channel) {
+    super.initRemoteConnection(channel);
     return new BitServerConnection(channel, context.getAllocator());
   }
 
@@ -102,10 +107,7 @@ public class DataServer extends BasicServer<RpcType, BitServerConnection> {
     };
   }
 
-  private final static FragmentRecordBatch OOM_FRAGMENT = FragmentRecordBatch.newBuilder().setIsOutOfMemory(true).build();
-
-
-  private FragmentHandle getHandle(FragmentRecordBatch batch, int index){
+  private static FragmentHandle getHandle(FragmentRecordBatch batch, int index) {
     return FragmentHandle.newBuilder()
         .setQueryId(batch.getQueryId())
         .setMajorFragmentId(batch.getReceivingMajorFragmentId())
@@ -113,73 +115,64 @@ public class DataServer extends BasicServer<RpcType, BitServerConnection> {
         .build();
   }
 
+  private void submit(IncomingDataBatch batch, int minorStart, int minorStopExclusive) throws FragmentSetupException,
+      IOException {
+    for (int minor = minorStart; minor < minorStopExclusive; minor++) {
+      final FragmentManager manager = workBus.getFragmentManager(getHandle(batch.getHeader(), minor));
+      if (manager == null) {
+        // A missing manager means the query already terminated. We can simply drop this data.
+        continue;
+      }
+
+      final boolean canRun = manager.handle(batch);
+      if (canRun) {
+        // logger.debug("Arriving batch means local batch can run, starting local batch.");
+        /*
+         * If we've reached the canRun threshold, we'll proceed. This expects manager.handle() to only return a single
+         * true. This is guaranteed by the interface.
+         */
+        bee.startFragmentPendingRemote(manager);
+      }
+    }
+
+  }
 
   @Override
   protected void handle(BitServerConnection connection, int rpcType, ByteBuf pBody, ByteBuf body, ResponseSender sender) throws RpcException {
     assert rpcType == RpcType.REQ_RECORD_BATCH_VALUE;
 
     final FragmentRecordBatch fragmentBatch = get(pBody, FragmentRecordBatch.PARSER);
-    final int targetCount = fragmentBatch.getReceivingMinorFragmentIdCount();
+    final AckSender ack = new AckSender(sender);
 
-    Pointer<DrillBuf> out = new Pointer<DrillBuf>();
-    AckSender ack = new AckSender(sender);
+
     // increment so we don't get false returns.
     ack.increment();
+
     try {
 
-      if(body == null){
+      final IncomingDataBatch batch = new IncomingDataBatch(fragmentBatch, (DrillBuf) body, ack);
+      final int targetCount = fragmentBatch.getReceivingMinorFragmentIdCount();
 
-        for(int minor = 0; minor < targetCount; minor++){
-          FragmentManager manager = workBus.getFragmentManager(getHandle(fragmentBatch, minor));
-          if(manager != null){
-            ack.increment();
-            dataHandler.handle(manager, fragmentBatch, null, ack);
-          }
-        }
-
-      }else{
-
-        for(int minor = 0; minor < targetCount; minor++){
-          FragmentManager manager = workBus.getFragmentManager(getHandle(fragmentBatch, minor));
-          if(manager == null){
-            continue;
-          }
-
-          BufferAllocator allocator = manager.getFragmentContext().getAllocator();
-
-          boolean withinMemoryEnvelope = allocator.takeOwnership((DrillBuf) body, out);
-
-          if(!withinMemoryEnvelope){
-            // if we over reserved, we need to add poison pill before batch.
-            dataHandler.handle(manager, OOM_FRAGMENT, null, null);
-          }
-
-          ack.increment();
-          dataHandler.handle(manager, fragmentBatch, out.value, ack);
-
-          // make sure to release the reference count we have to the new buffer.
-          // dataHandler.handle should have taken any ownership it needed.
-          out.value.release();
-        }
-        out = null;
-      }
+      // randomize who gets first transfer (and thus ownership) so memory usage is balanced when we're sharing amongst
+      // multiple fragments.
+      final int firstOwner = ThreadLocalRandom.current().nextInt(targetCount);
+      submit(batch, firstOwner, targetCount);
+      submit(batch, 0, firstOwner);
 
     } catch (IOException | FragmentSetupException e) {
       logger.error("Failure while getting fragment manager. {}",
           QueryIdHelper.getQueryIdentifiers(fragmentBatch.getQueryId(),
               fragmentBatch.getReceivingMajorFragmentId(),
-              fragmentBatch.getReceivingMinorFragmentIdList()));
+              fragmentBatch.getReceivingMinorFragmentIdList()), e);
       ack.clear();
       sender.send(new Response(RpcType.ACK, Acks.FAIL));
     } finally {
 
       // decrement the extra reference we grabbed at the top.
       ack.sendOk();
-      if(out != null && out.value != null){
-        out.value.release();
-      }
     }
   }
+
 
   private class ProxyCloseHandler implements GenericFutureListener<ChannelFuture> {
 
@@ -202,7 +195,7 @@ public class DataServer extends BasicServer<RpcType, BitServerConnection> {
     return new OutOfMemoryHandler() {
       @Override
       public void handle() {
-        dataHandler.informOutOfMemory();
+        logger.error("Out of memory in RPC layer.");
       }
     };
   }

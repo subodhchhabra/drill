@@ -21,24 +21,25 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import net.hydromatic.optiq.SchemaPlus;
-import net.hydromatic.optiq.tools.RelConversionException;
-import net.hydromatic.optiq.tools.ValidationException;
-
+import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.tools.RelConversionException;
+import org.apache.calcite.tools.ValidationException;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.exec.physical.PhysicalPlan;
 import org.apache.drill.exec.planner.sql.DirectPlan;
+import org.apache.drill.exec.planner.sql.SchemaUtilites;
 import org.apache.drill.exec.planner.sql.parser.SqlShowFiles;
 import org.apache.drill.exec.store.AbstractSchema;
-import org.apache.drill.exec.store.dfs.WorkspaceSchemaFactory.WorkspaceSchema;
 import org.apache.drill.exec.store.dfs.DrillFileSystem;
+import org.apache.drill.exec.store.dfs.WorkspaceSchemaFactory.WorkspaceSchema;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
-import org.eigenbase.sql.SqlIdentifier;
-import org.eigenbase.sql.SqlNode;
 
 
 public class ShowFileHandler extends DefaultSqlHandler {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SetOptionHandler.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(SetOptionHandler.class);
 
   public ShowFileHandler(SqlHandlerConfig config) {
     super(config);
@@ -53,42 +54,42 @@ public class ShowFileHandler extends DefaultSqlHandler {
     String defaultLocation = null;
     String fromDir = "./";
 
-    try {
-      SchemaPlus defaultSchema = context.getNewDefaultSchema();
-      SchemaPlus drillSchema = defaultSchema;
+    SchemaPlus defaultSchema = config.getConverter().getDefaultSchema();
+    SchemaPlus drillSchema = defaultSchema;
 
-      // Show files can be used without from clause, in which case we display the files in the default schema
-      if (from != null) {
-        // We are not sure if the full from clause is just the schema or includes table name, first try to see if the full path specified is a schema
-        try {
-          drillSchema = findSchema(context.getRootSchema(), defaultSchema, from.names);
-        } catch (Exception e) {
-            // Entire from clause is not a schema, try to obtain the schema without the last part of the specified clause.
-            drillSchema = findSchema(context.getRootSchema(), defaultSchema, from.names.subList(0, from.names.size() - 1));
-            fromDir = fromDir + from.names.get((from.names.size() - 1));
-        }
+    // Show files can be used without from clause, in which case we display the files in the default schema
+    if (from != null) {
+      // We are not sure if the full from clause is just the schema or includes table name,
+      // first try to see if the full path specified is a schema
+      drillSchema = SchemaUtilites.findSchema(defaultSchema, from.names);
+      if (drillSchema == null) {
+        // Entire from clause is not a schema, try to obtain the schema without the last part of the specified clause.
+        drillSchema = SchemaUtilites.findSchema(defaultSchema, from.names.subList(0, from.names.size() - 1));
+        fromDir = fromDir + from.names.get((from.names.size() - 1));
       }
 
-      AbstractSchema tempSchema = getDrillSchema(drillSchema);
-      WorkspaceSchema schema = null;
-      if (tempSchema instanceof WorkspaceSchema) {
-        schema = ((WorkspaceSchema)tempSchema);
-      } else {
-        throw new ValidationException("Unsupported schema");
+      if (drillSchema == null) {
+        throw UserException.validationError()
+            .message("Invalid FROM/IN clause [%s]", from.toString())
+            .build(logger);
       }
-
-      // Get the file system object
-      fs = schema.getFS();
-
-      // Get the default path
-      defaultLocation = schema.getDefaultLocation();
-    } catch (Exception e) {
-        if (from == null) {
-          return DirectPlan.createDirectPlan(context, false, "Show files without FROM / IN clause can be used only after specifying a default file system schema");
-        }
-        return DirectPlan.createDirectPlan(context, false, String.format("Current schema '%s' is not a file system schema. " +
-                                           "Can't execute show files on this schema.", from.toString()));
     }
+
+    WorkspaceSchema wsSchema;
+    try {
+       wsSchema = (WorkspaceSchema) drillSchema.unwrap(AbstractSchema.class).getDefaultSchema();
+    } catch (ClassCastException e) {
+      throw UserException.validationError()
+          .message("SHOW FILES is supported in workspace type schema only. Schema [%s] is not a workspace schema.",
+              SchemaUtilites.getSchemaPath(drillSchema))
+          .build(logger);
+    }
+
+    // Get the file system object
+    fs = wsSchema.getFS();
+
+    // Get the default path
+    defaultLocation = wsSchema.getDefaultLocation();
 
     List<ShowFilesCommandResult> rows = new ArrayList<>();
 

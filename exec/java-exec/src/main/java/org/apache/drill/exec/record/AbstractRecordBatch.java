@@ -20,54 +20,72 @@ package org.apache.drill.exec.record;
 import java.util.Iterator;
 
 import org.apache.drill.common.exceptions.DrillRuntimeException;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.expression.SchemaPath;
+import org.apache.drill.exec.ExecConstants;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.ops.OperatorContext;
 import org.apache.drill.exec.ops.OperatorStats;
 import org.apache.drill.exec.physical.base.PhysicalOperator;
 import org.apache.drill.exec.record.selection.SelectionVector2;
 import org.apache.drill.exec.record.selection.SelectionVector4;
+import org.apache.drill.exec.server.options.OptionValue;
 
-public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements RecordBatch{
-  final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(this.getClass());
+public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements CloseableRecordBatch {
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(new Object() {}.getClass().getEnclosingClass());
 
-  protected final VectorContainer container; //= new VectorContainer();
+  protected final VectorContainer container;
   protected final T popConfig;
   protected final FragmentContext context;
   protected final OperatorContext oContext;
   protected final OperatorStats stats;
+  protected final boolean unionTypeEnabled;
 
   protected BatchState state;
 
-  protected AbstractRecordBatch(T popConfig, FragmentContext context) throws OutOfMemoryException {
-    this(popConfig, context, true, new OperatorContext(popConfig, context, true));
+  protected AbstractRecordBatch(final T popConfig, final FragmentContext context) throws OutOfMemoryException {
+    this(popConfig, context, true, context.newOperatorContext(popConfig));
   }
 
-  protected AbstractRecordBatch(T popConfig, FragmentContext context, boolean buildSchema) throws OutOfMemoryException {
-    this(popConfig, context, buildSchema, new OperatorContext(popConfig, context, true));
+  protected AbstractRecordBatch(final T popConfig, final FragmentContext context, final boolean buildSchema) throws OutOfMemoryException {
+    this(popConfig, context, buildSchema, context.newOperatorContext(popConfig));
   }
 
-  protected AbstractRecordBatch(T popConfig, FragmentContext context, boolean buildSchema, OperatorContext oContext) throws OutOfMemoryException {
-    super();
+  protected AbstractRecordBatch(final T popConfig, final FragmentContext context, final boolean buildSchema,
+      final OperatorContext oContext) {
     this.context = context;
     this.popConfig = popConfig;
     this.oContext = oContext;
-    this.stats = oContext.getStats();
-    this.container = new VectorContainer(this.oContext);
+    stats = oContext.getStats();
+    container = new VectorContainer(this.oContext);
     if (buildSchema) {
       state = BatchState.BUILD_SCHEMA;
     } else {
       state = BatchState.FIRST;
     }
+    OptionValue option = context.getOptions().getOption(ExecConstants.ENABLE_UNION_TYPE.getOptionName());
+    if (option != null) {
+      unionTypeEnabled = option.bool_val;
+    } else {
+      unionTypeEnabled = false;
+    }
   }
 
   protected static enum BatchState {
-    BUILD_SCHEMA, // Need to build schema and return
-    FIRST, // This is still the first data batch
-    NOT_FIRST, // The first data batch has alread been returned
-    DONE // All work is done, no more data to be sent
+    /** Need to build schema and return. */
+    BUILD_SCHEMA,
+    /** This is still the first data batch. */
+    FIRST,
+    /** The first data batch has already been returned. */
+    NOT_FIRST,
+    /** The query most likely failed, we need to propagate STOP to the root. */
+    STOP,
+    /** Out of Memory while building the Schema...Ouch! */
+    OUT_OF_MEMORY,
+    /** All work is done, no more data to be sent. */
+    DONE
   }
 
   @Override
@@ -84,16 +102,18 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
     return popConfig;
   }
 
-  public final IterOutcome next(RecordBatch b) {
-
+  public final IterOutcome next(final RecordBatch b) {
+    if(!context.shouldContinue()) {
+      return IterOutcome.STOP;
+    }
     return next(0, b);
   }
 
-  public final IterOutcome next(int inputIndex, RecordBatch b){
+  public final IterOutcome next(final int inputIndex, final RecordBatch b){
     IterOutcome next = null;
     stats.stopProcessing();
     try{
-      if (context.isCancelled()) {
+      if (!context.shouldContinue()) {
         return IterOutcome.STOP;
       }
       next = b.next();
@@ -113,26 +133,26 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
     return next;
   }
 
+  @Override
   public final IterOutcome next() {
     try {
       stats.startProcessing();
-//      if (state == BatchState.BUILD_SCHEMA) {
-//        buildSchema();
-//        if (state == BatchState.BUILD_SCHEMA.DONE) {
-//          return IterOutcome.NONE;
-//        } else {
-//          state = BatchState.FIRST;
-//          return IterOutcome.OK_NEW_SCHEMA;
-//        }
-//      }
       switch (state) {
         case BUILD_SCHEMA: {
           buildSchema();
-          if (state == BatchState.DONE) {
-            return IterOutcome.NONE;
-          } else {
-            state = BatchState.FIRST;
-            return IterOutcome.OK_NEW_SCHEMA;
+          switch (state) {
+            case DONE:
+              return IterOutcome.NONE;
+            case OUT_OF_MEMORY:
+              // because we don't support schema changes, it is safe to fail the query right away
+              context.fail(UserException.memoryError()
+                .build(logger));
+              // FALL-THROUGH
+            case STOP:
+              return IterOutcome.STOP;
+            default:
+              state = BatchState.FIRST;
+              return IterOutcome.OK_NEW_SCHEMA;
           }
         }
         case DONE: {
@@ -141,7 +161,7 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
         default:
           return innerNext();
       }
-    } catch (SchemaChangeException e) {
+    } catch (final SchemaChangeException e) {
       throw new DrillRuntimeException(e);
     } finally {
       stats.stopProcessing();
@@ -152,24 +172,27 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
 
   @Override
   public BatchSchema getSchema() {
-    return container.getSchema();
+    if (container.hasSchema()) {
+      return container.getSchema();
+    } else {
+      return null;
+    }
   }
 
   protected void buildSchema() throws SchemaChangeException {
   }
 
   @Override
-  public void kill(boolean sendUpstream) {
+  public void kill(final boolean sendUpstream) {
     killIncoming(sendUpstream);
   }
 
   protected abstract void killIncoming(boolean sendUpstream);
 
-  public void cleanup(){
+  @Override
+  public void close() {
     container.clear();
-    oContext.close();
   }
-
 
   @Override
   public SelectionVector2 getSelectionVector2() {
@@ -182,20 +205,19 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
   }
 
   @Override
-  public TypedFieldId getValueVectorId(SchemaPath path) {
+  public TypedFieldId getValueVectorId(final SchemaPath path) {
     return container.getValueVectorId(path);
   }
 
   @Override
-  public VectorWrapper<?> getValueAccessorById(Class<?> clazz, int... ids) {
+  public VectorWrapper<?> getValueAccessorById(final Class<?> clazz, final int... ids) {
     return container.getValueAccessorById(clazz, ids);
   }
-
 
   @Override
   public WritableBatch getWritableBatch() {
 //    logger.debug("Getting writable batch.");
-    WritableBatch batch = WritableBatch.get(this);
+    final WritableBatch batch = WritableBatch.get(this);
     return batch;
 
   }
@@ -204,5 +226,4 @@ public abstract class AbstractRecordBatch<T extends PhysicalOperator> implements
   public VectorContainer getOutgoingContainer() {
     throw new UnsupportedOperationException(String.format(" You should not call getOutgoingContainer() for class %s", this.getClass().getCanonicalName()));
   }
-
 }

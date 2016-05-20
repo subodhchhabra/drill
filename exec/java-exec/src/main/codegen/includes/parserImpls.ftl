@@ -136,7 +136,23 @@ SqlNode SqlUseSchema():
 }
 
 /** Parses an optional field list and makes sure no field is a "*". */
-SqlNodeList ParseFieldList(String relType) :
+SqlNodeList ParseOptionalFieldList(String relType) :
+{
+    SqlNodeList fieldList;
+}
+{
+    fieldList = ParseRequiredFieldList(relType)
+    {
+        return fieldList;
+    }
+    |
+    {
+        return SqlNodeList.EMPTY;
+    }
+}
+
+/** Parses a required field list and makes sure no field is a "*". */
+SqlNodeList ParseRequiredFieldList(String relType) :
 {
     SqlNodeList fieldList;
 }
@@ -151,10 +167,6 @@ SqlNodeList ParseFieldList(String relType) :
                 throw new ParseException(String.format("%s's field list has a '*', which is invalid.", relType));
         }
         return fieldList;
-    }
-    |
-    {
-        return null;
     }
 }
 
@@ -175,7 +187,7 @@ SqlNode SqlCreateOrReplaceView() :
     [ <OR> <REPLACE> { replaceView = true; } ]
     <VIEW>
     viewName = CompoundIdentifier()
-    fieldList = ParseFieldList("View")
+    fieldList = ParseOptionalFieldList("View")
     <AS>
     query = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
     {
@@ -208,16 +220,61 @@ SqlNode SqlCreateTable() :
     SqlParserPos pos;
     SqlIdentifier tblName;
     SqlNodeList fieldList;
+    SqlNodeList partitionFieldList;
     SqlNode query;
 }
 {
+    {
+        partitionFieldList = SqlNodeList.EMPTY;
+    }
     <CREATE> { pos = getPos(); }
     <TABLE>
     tblName = CompoundIdentifier()
-    fieldList = ParseFieldList("Table")
+    fieldList = ParseOptionalFieldList("Table")
+    (   <PARTITION> <BY>
+        partitionFieldList = ParseRequiredFieldList("Partition")
+    )?
     <AS>
     query = OrderedQueryOrExpr(ExprContext.ACCEPT_QUERY)
     {
-        return new SqlCreateTable(pos, tblName, fieldList, query);
+        return new SqlCreateTable(pos, tblName, fieldList, partitionFieldList, query);
     }
 }
+
+/**
+ * Parses a drop table statement.
+ * DROP TABLE table_name;
+ */
+SqlNode SqlDropTable() :
+{
+    SqlParserPos pos;
+}
+{
+    <DROP> { pos = getPos(); }
+    <TABLE>
+    {
+        return new SqlDropTable(pos, CompoundIdentifier());
+    }
+}
+
+/**
+ * Parse refresh table metadata statement.
+ * REFRESH TABLE METADATA tblname
+ */
+SqlNode SqlRefreshMetadata() :
+{
+    SqlParserPos pos;
+    SqlIdentifier tblName;
+    SqlNodeList fieldList;
+    SqlNode query;
+}
+{
+    <REFRESH> { pos = getPos(); }
+    <TABLE>
+    <METADATA>
+    tblName = CompoundIdentifier()
+    {
+        return new SqlRefreshMetadata(pos, tblName);
+    }
+}
+

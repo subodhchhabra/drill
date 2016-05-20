@@ -20,20 +20,17 @@ package org.apache.drill.exec.physical.impl.flatten;
 import java.io.IOException;
 import java.util.List;
 
-import com.carrotsearch.hppc.IntOpenHashSet;
-import com.google.common.base.Preconditions;
-import org.apache.drill.common.exceptions.DrillRuntimeException;
+import org.apache.drill.common.exceptions.UserException;
 import org.apache.drill.common.expression.ErrorCollector;
 import org.apache.drill.common.expression.ErrorCollectorImpl;
 import org.apache.drill.common.expression.FieldReference;
 import org.apache.drill.common.expression.LogicalExpression;
-import org.apache.drill.common.expression.PathSegment;
+import org.apache.drill.common.expression.SchemaPath;
 import org.apache.drill.common.logical.data.NamedExpression;
-import org.apache.drill.common.types.TypeProtos;
 import org.apache.drill.exec.exception.ClassTransformationException;
+import org.apache.drill.exec.exception.OutOfMemoryException;
 import org.apache.drill.exec.exception.SchemaChangeException;
 import org.apache.drill.exec.expr.ClassGenerator;
-import org.apache.drill.exec.expr.ClassGenerator.HoldingContainer;
 import org.apache.drill.exec.expr.CodeGenerator;
 import org.apache.drill.exec.expr.DrillFuncHolderExpr;
 import org.apache.drill.exec.expr.ExpressionTreeMaterializer;
@@ -41,7 +38,6 @@ import org.apache.drill.exec.expr.TypeHelper;
 import org.apache.drill.exec.expr.ValueVectorReadExpression;
 import org.apache.drill.exec.expr.ValueVectorWriteExpression;
 import org.apache.drill.exec.expr.fn.DrillComplexWriterFuncHolder;
-import org.apache.drill.exec.memory.OutOfMemoryException;
 import org.apache.drill.exec.ops.FragmentContext;
 import org.apache.drill.exec.physical.config.FlattenPOP;
 import org.apache.drill.exec.record.AbstractSingleRecordBatch;
@@ -52,19 +48,19 @@ import org.apache.drill.exec.record.TransferPair;
 import org.apache.drill.exec.record.TypedFieldId;
 import org.apache.drill.exec.record.VectorContainer;
 import org.apache.drill.exec.record.VectorWrapper;
-import org.apache.drill.exec.vector.RepeatedVector;
 import org.apache.drill.exec.vector.ValueVector;
-import org.apache.drill.exec.vector.complex.MapVector;
 import org.apache.drill.exec.vector.complex.RepeatedMapVector;
+import org.apache.drill.exec.vector.complex.RepeatedValueVector;
 import org.apache.drill.exec.vector.complex.writer.BaseWriter.ComplexWriter;
 
+import com.carrotsearch.hppc.IntHashSet;
 import com.google.common.collect.Lists;
 import com.sun.codemodel.JExpr;
 
 // TODO - handle the case where a user tries to flatten a scalar, should just act as a project all of the columns exactly
 // as they come in
 public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FlattenRecordBatch.class);
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(FlattenRecordBatch.class);
 
   private Flattener flattener;
   private List<ValueVector> allocationVectors;
@@ -72,21 +68,24 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
   private boolean hasRemainder = false;
   private int remainderIndex = 0;
   private int recordCount;
-  // the buildSchema method is always called first by a short circuit path to return schema information to the client
-  // this information is not entirely accurate as Drill determines schema on the fly, so here it needs to have modified
-  // behavior for that call to setup the schema for the flatten operation
-  private boolean fastSchemaCalled;
+
+  private final Flattener.Monitor monitor = new Flattener.Monitor() {
+    @Override
+    public int getBufferSizeFor(int recordCount) {
+      int bufferSize = 0;
+      for(final ValueVector vv : allocationVectors) {
+        bufferSize += vv.getBufferSizeFor(recordCount);
+      }
+      return bufferSize;
+    }
+  };
 
   private static final String EMPTY_STRING = "";
 
   private class ClassifierResult {
-    public boolean isStar = false;
     public List<String> outputNames;
-    public String prefix = "";
 
     private void clear() {
-      isStar = false;
-      prefix = "";
       if (outputNames != null) {
         outputNames.clear();
       }
@@ -97,7 +96,6 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
 
   public FlattenRecordBatch(FlattenPOP pop, RecordBatch incoming, FragmentContext context) throws OutOfMemoryException {
     super(pop, context, incoming);
-    fastSchemaCalled = false;
   }
 
   @Override
@@ -129,13 +127,13 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
 
   private void setFlattenVector() {
     try {
-      flattener.setFlattenField((RepeatedVector) incoming.getValueAccessorById(
-          incoming.getSchema().getColumn(
-              incoming.getValueVectorId(
-                  popConfig.getColumn()).getFieldIds()[0]).getValueClass(),
-          incoming.getValueVectorId(popConfig.getColumn()).getFieldIds()).getValueVector());
+      final TypedFieldId typedFieldId = incoming.getValueVectorId(popConfig.getColumn());
+      final MaterializedField field = incoming.getSchema().getColumn(typedFieldId.getFieldIds()[0]);
+      final RepeatedValueVector vector = RepeatedValueVector.class.cast(incoming.getValueAccessorById(
+          field.getValueClass(), typedFieldId.getFieldIds()).getValueVector());
+      flattener.setFlattenField(vector);
     } catch (Exception ex) {
-      throw new DrillRuntimeException("Trying to flatten a non-repeated filed.");
+      throw UserException.unsupportedError(ex).message("Trying to flatten a non-repeated field.").build(logger);
     }
   }
 
@@ -152,8 +150,8 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
     // inside of the the flattener for the current batch
     setFlattenVector();
 
-    int childCount = incomingRecordCount == 0 ? 0 : flattener.getFlattenField().getAccessor().getValueCount();
-    int outputRecords = flattener.flattenRecords(0, incomingRecordCount, 0);
+    int childCount = incomingRecordCount == 0 ? 0 : flattener.getFlattenField().getAccessor().getInnerValueCount();
+    int outputRecords = flattener.flattenRecords(incomingRecordCount, 0, monitor);
     // TODO - change this to be based on the repeated vector length
     if (outputRecords < childCount) {
       setValueCount(outputRecords);
@@ -178,13 +176,13 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
   }
 
   private void handleRemainder() {
-    int remainingRecordCount = flattener.getFlattenField().getAccessor().getValueCount() - remainderIndex;
+    int remainingRecordCount = flattener.getFlattenField().getAccessor().getInnerValueCount() - remainderIndex;
     if (!doAlloc()) {
       outOfMemory = true;
       return;
     }
 
-    int projRecords = flattener.flattenRecords(remainderIndex, remainingRecordCount, 0);
+    int projRecords = flattener.flattenRecords(remainingRecordCount, 0, monitor);
     if (projRecords < remainingRecordCount) {
       setValueCount(projRecords);
       this.recordCount = projRecords;
@@ -246,9 +244,7 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
   }
 
   private FieldReference getRef(NamedExpression e) {
-    FieldReference ref = e.getRef();
-    PathSegment seg = ref.getRootSegment();
-
+    final FieldReference ref = e.getRef();
     return ref;
   }
 
@@ -264,17 +260,17 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
    */
   private TransferPair getFlattenFieldTransferPair(FieldReference reference) {
     final TypedFieldId fieldId = incoming.getValueVectorId(popConfig.getColumn());
-    final Class vectorClass = incoming.getSchema().getColumn(fieldId.getFieldIds()[0]).getValueClass();
+    final Class<?> vectorClass = incoming.getSchema().getColumn(fieldId.getFieldIds()[0]).getValueClass();
     final ValueVector flattenField = incoming.getValueAccessorById(vectorClass, fieldId.getFieldIds()).getValueVector();
 
     TransferPair tp = null;
     if (flattenField instanceof RepeatedMapVector) {
-      tp = ((RepeatedMapVector)flattenField).getTransferPairToSingleMap(reference);
+      tp = ((RepeatedMapVector)flattenField).getTransferPairToSingleMap(reference.getAsNamePart().getName(), oContext.getAllocator());
     } else {
-      ValueVector vvIn = ((RepeatedVector)flattenField).getAccessor().getAllChildValues();
+      final ValueVector vvIn = RepeatedValueVector.class.cast(flattenField).getDataVector();
       // vvIn may be null because of fast schema return for repeated list vectors
       if (vvIn != null) {
-        tp = vvIn.getTransferPair(reference);
+        tp = vvIn.getTransferPair(reference.getAsNamePart().getName(), oContext.getAllocator());
       }
     }
     return tp;
@@ -289,7 +285,7 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
     final List<TransferPair> transfers = Lists.newArrayList();
 
     final ClassGenerator<Flattener> cg = CodeGenerator.getRoot(Flattener.TEMPLATE_DEFINITION, context.getFunctionRegistry());
-    final IntOpenHashSet transferFieldIds = new IntOpenHashSet();
+    final IntHashSet transferFieldIds = new IntHashSet();
 
     final NamedExpression flattenExpr = new NamedExpression(popConfig.getColumn(), new FieldReference(popConfig.getColumn()));
     final ValueVectorReadExpression vectorRead = (ValueVectorReadExpression)ExpressionTreeMaterializer.materialize(flattenExpr.getExpr(), incoming, collector, context.getFunctionRegistry(), true);
@@ -341,7 +337,7 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
         allocationVectors.add(vector);
         TypedFieldId fid = container.add(vector);
         ValueVectorWriteExpression write = new ValueVectorWriteExpression(fid, expr, true);
-        HoldingContainer hc = cg.addExpr(write);
+        cg.addExpr(write);
 
         logger.debug("Added eval for project expression.");
       }
@@ -365,12 +361,11 @@ public class FlattenRecordBatch extends AbstractSingleRecordBatch<FlattenPOP> {
 
     List<NamedExpression> exprs = Lists.newArrayList();
     for (MaterializedField field : incoming.getSchema()) {
-      if (field.getPath().equals(popConfig.getColumn())) {
+      if (field.getPath().equals(popConfig.getColumn().getAsUnescapedPath())) {
         continue;
       }
-      exprs.add(new NamedExpression(field.getPath(), new FieldReference(field.getPath())));
+      exprs.add(new NamedExpression(SchemaPath.getSimplePath(field.getPath()), new FieldReference(field.getPath())));
     }
     return exprs;
   }
-
 }

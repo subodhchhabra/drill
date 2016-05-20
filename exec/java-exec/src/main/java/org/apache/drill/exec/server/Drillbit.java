@@ -17,194 +17,305 @@
  */
 package org.apache.drill.exec.server;
 
-import java.io.Closeable;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.drill.common.AutoCloseables;
+import org.apache.drill.common.StackTrace;
 import org.apache.drill.common.config.DrillConfig;
+import org.apache.drill.common.scanner.ClassPathScanner;
+import org.apache.drill.common.scanner.persistence.ScanResult;
 import org.apache.drill.exec.ExecConstants;
 import org.apache.drill.exec.coord.ClusterCoordinator;
 import org.apache.drill.exec.coord.ClusterCoordinator.RegistrationHandle;
 import org.apache.drill.exec.coord.zk.ZKClusterCoordinator;
 import org.apache.drill.exec.exception.DrillbitStartupException;
 import org.apache.drill.exec.proto.CoordinationProtos.DrillbitEndpoint;
-import org.apache.drill.exec.server.rest.DrillRestServer;
+import org.apache.drill.exec.server.options.OptionManager;
+import org.apache.drill.exec.server.options.OptionValue;
+import org.apache.drill.exec.server.options.OptionValue.OptionType;
+import org.apache.drill.exec.server.rest.WebServer;
 import org.apache.drill.exec.service.ServiceEngine;
-import org.apache.drill.exec.store.sys.CachingStoreProvider;
-import org.apache.drill.exec.store.sys.PStoreProvider;
-import org.apache.drill.exec.store.sys.PStoreRegistry;
-import org.apache.drill.exec.store.sys.local.LocalPStoreProvider;
+import org.apache.drill.exec.store.StoragePluginRegistry;
+import org.apache.drill.exec.store.sys.store.provider.CachingPersistentStoreProvider;
+import org.apache.drill.exec.store.sys.PersistentStoreProvider;
+import org.apache.drill.exec.store.sys.PersistentStoreRegistry;
+import org.apache.drill.exec.store.sys.store.provider.LocalPersistentStoreProvider;
 import org.apache.drill.exec.work.WorkManager;
 import org.apache.zookeeper.Environment;
-import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.ErrorHandler;
-import org.eclipse.jetty.servlet.DefaultServlet;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.eclipse.jetty.util.resource.Resource;
-import org.glassfish.jersey.servlet.ServletContainer;
 
-import com.codahale.metrics.servlets.MetricsServlet;
-import com.codahale.metrics.servlets.ThreadDumpServlet;
-import com.google.common.io.Closeables;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Stopwatch;
 
 /**
  * Starts, tracks and stops all the required services for a Drillbit daemon to work.
  */
-public class Drillbit implements Closeable{
-  static final org.slf4j.Logger logger;
+public class Drillbit implements AutoCloseable {
+  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(Drillbit.class);
+
   static {
-    logger = org.slf4j.LoggerFactory.getLogger(Drillbit.class);
-    Environment.logEnv("Drillbit environment:.", logger);
+    Environment.logEnv("Drillbit environment: ", logger);
   }
 
-  public static Drillbit start(StartupOptions options) throws DrillbitStartupException {
-    return start(DrillConfig.create(options.getConfigLocation()));
+  private final static String SYSTEM_OPTIONS_NAME = "org.apache.drill.exec.server.Drillbit.system_options";
+
+  private boolean isClosed = false;
+
+  private final ClusterCoordinator coord;
+  private final ServiceEngine engine;
+  private final PersistentStoreProvider storeProvider;
+  private final WorkManager manager;
+  private final BootStrapContext context;
+  private final WebServer webServer;
+  private RegistrationHandle registrationHandle;
+  private volatile StoragePluginRegistry storageRegistry;
+
+  @VisibleForTesting
+  public Drillbit(
+      final DrillConfig config,
+      final RemoteServiceSet serviceSet) throws Exception {
+    this(config, serviceSet, ClassPathScanner.fromPrescan(config));
   }
 
-  public static Drillbit start(DrillConfig config) throws DrillbitStartupException {
-    Drillbit bit;
-    try {
-      logger.debug("Setting up Drillbit.");
-      bit = new Drillbit(config, null);
-    } catch (Exception ex) {
-      throw new DrillbitStartupException("Failure while initializing values in Drillbit.", ex);
-    }
-    try {
-      logger.debug("Starting Drillbit.");
-      bit.run();
-    } catch (Exception e) {
-      bit.close();
-      throw new DrillbitStartupException("Failure during initial startup of Drillbit.", e);
-    }
-    return bit;
-  }
+  public Drillbit(
+      final DrillConfig config,
+      final RemoteServiceSet serviceSet,
+      final ScanResult classpathScan) throws Exception {
+    final Stopwatch w = Stopwatch.createStarted();
+    logger.debug("Construction started.");
+    final boolean allowPortHunting = serviceSet != null;
+    context = new BootStrapContext(config, classpathScan);
+    manager = new WorkManager(context);
 
-  public static void main(String[] cli) throws DrillbitStartupException {
-    StartupOptions options = StartupOptions.parse(cli);
-    start(options);
-  }
-
-  final ClusterCoordinator coord;
-  final ServiceEngine engine;
-  final PStoreProvider storeProvider;
-  final WorkManager manager;
-  final BootStrapContext context;
-  final Server embeddedJetty;
-
-  private volatile RegistrationHandle handle;
-
-  public Drillbit(DrillConfig config, RemoteServiceSet serviceSet) throws Exception {
-    boolean allowPortHunting = serviceSet != null;
-    boolean enableHttp = config.getBoolean(ExecConstants.HTTP_ENABLE);
-    this.context = new BootStrapContext(config);
-    this.manager = new WorkManager(context);
-    this.engine = new ServiceEngine(manager.getControlMessageHandler(), manager.getUserWorker(), context, manager.getWorkBus(), manager.getDataHandler(), allowPortHunting);
-
-    if(enableHttp) {
-      this.embeddedJetty = new Server(config.getInt(ExecConstants.HTTP_PORT));
+    webServer = new WebServer(config, context.getMetrics(), manager);
+    boolean isDistributedMode = false;
+    if (serviceSet != null) {
+      coord = serviceSet.getCoordinator();
+      storeProvider = new CachingPersistentStoreProvider(new LocalPersistentStoreProvider(config));
     } else {
-      this.embeddedJetty = null;
+      coord = new ZKClusterCoordinator(config);
+      storeProvider = new PersistentStoreRegistry(this.coord, config).newPStoreProvider();
+      isDistributedMode = true;
     }
 
-    if(serviceSet != null) {
-      this.coord = serviceSet.getCoordinator();
-      this.storeProvider = new CachingStoreProvider(new LocalPStoreProvider(config));
-    } else {
-      Runtime.getRuntime().addShutdownHook(new ShutdownThread(config));
-      this.coord = new ZKClusterCoordinator(config);
-      this.storeProvider = new PStoreRegistry(this.coord, config).newPStoreProvider();
-    }
+    engine = new ServiceEngine(manager.getControlMessageHandler(), manager.getUserWorker(), context,
+        manager.getWorkBus(), manager.getBee(), allowPortHunting, isDistributedMode);
+
+    logger.info("Construction completed ({} ms).", w.elapsed(TimeUnit.MILLISECONDS));
   }
 
-  private void startJetty() throws Exception{
-    if (embeddedJetty == null) {
+  public void run() throws Exception {
+    final Stopwatch w = Stopwatch.createStarted();
+    logger.debug("Startup begun.");
+    coord.start(10000);
+    storeProvider.start();
+    final DrillbitEndpoint md = engine.start();
+    manager.start(md, engine.getController(), engine.getDataConnectionCreator(), coord, storeProvider);
+    final DrillbitContext drillbitContext = manager.getContext();
+    storageRegistry = drillbitContext.getStorage();
+    storageRegistry.init();
+    drillbitContext.getOptionManager().init();
+    javaPropertiesToSystemOptions();
+    registrationHandle = coord.register(md);
+    webServer.start();
+
+    Runtime.getRuntime().addShutdownHook(new ShutdownThread(this, new StackTrace()));
+    logger.info("Startup completed ({} ms).", w.elapsed(TimeUnit.MILLISECONDS));
+  }
+
+  @Override
+  public synchronized void close() {
+    // avoid complaints about double closing
+    if (isClosed) {
+      return;
+    }
+    final Stopwatch w = Stopwatch.createStarted();
+    logger.debug("Shutdown begun.");
+
+    // wait for anything that is running to complete
+    manager.waitToExit();
+
+    if (coord != null && registrationHandle != null) {
+      coord.unregister(registrationHandle);
+    }
+    try {
+      Thread.sleep(context.getConfig().getInt(ExecConstants.ZK_REFRESH) * 2);
+    } catch (final InterruptedException e) {
+      logger.warn("Interrupted while sleeping during coordination deregistration.");
+
+      // Preserve evidence that the interruption occurred so that code higher up on the call stack can learn of the
+      // interruption and respond to it if it wants to.
+      Thread.currentThread().interrupt();
+    }
+
+    try {
+      AutoCloseables.close(
+          webServer,
+          engine,
+          storeProvider,
+          coord,
+          manager,
+          storageRegistry,
+          context);
+    } catch(Exception e) {
+      logger.warn("Failure on close()", e);
+    }
+
+    logger.info("Shutdown completed ({} ms).", w.elapsed(TimeUnit.MILLISECONDS));
+    isClosed = true;
+  }
+
+  private void javaPropertiesToSystemOptions() {
+    // get the system options property
+    final String allSystemProps = System.getProperty(SYSTEM_OPTIONS_NAME);
+    if ((allSystemProps == null) || allSystemProps.isEmpty()) {
       return;
     }
 
-    ServletContextHandler context = new ServletContextHandler(ServletContextHandler.NO_SESSIONS);
+    final OptionManager optionManager = getContext().getOptionManager();
 
-    ErrorHandler errorHandler = new ErrorHandler();
-    errorHandler.setShowStacks(true);
-    errorHandler.setShowMessageInTitle(true);
-    context.setErrorHandler(errorHandler);
-    context.setContextPath("/");
-    embeddedJetty.setHandler(context);
-    ServletHolder h = new ServletHolder(new ServletContainer(new DrillRestServer(manager)));
-//    h.setInitParameter(ServerProperties.PROVIDER_PACKAGES, "org.apache.drill.exec.server");
-    h.setInitOrder(1);
-    context.addServlet(h, "/*");
-    context.addServlet(new ServletHolder(new MetricsServlet(this.context.getMetrics())), "/status/metrics");
-    context.addServlet(new ServletHolder(new ThreadDumpServlet()), "/status/threads");
-
-    ServletHolder staticHolder = new ServletHolder("static", DefaultServlet.class);
-    staticHolder.setInitParameter("resourceBase", Resource.newClassPathResource("/rest/static").toString());
-    staticHolder.setInitParameter("dirAllowed","false");
-    staticHolder.setInitParameter("pathInfoOnly","true");
-    context.addServlet(staticHolder,"/static/*");
-
-    embeddedJetty.start();
-
-  }
-
-
-
-  public void run() throws Exception {
-    coord.start(10000);
-    storeProvider.start();
-    DrillbitEndpoint md = engine.start();
-    manager.start(md, engine.getController(), engine.getDataConnectionCreator(), coord, storeProvider);
-    manager.getContext().getStorage().init();
-    manager.getContext().getOptionManager().init();
-    handle = coord.register(md);
-    startJetty();
-  }
-
-  public void close() {
-    if (coord != null && handle != null) {
-      coord.unregister(handle);
-    }
-
-    try {
-      Thread.sleep(context.getConfig().getInt(ExecConstants.ZK_REFRESH) * 2);
-    } catch (InterruptedException e) {
-      logger.warn("Interrupted while sleeping during coordination deregistration.");
-    }
-    try {
-      if (embeddedJetty != null) {
-        embeddedJetty.stop();
+    // parse out the properties, validate, and then set them
+    final String systemProps[] = allSystemProps.split(",");
+    for (final String systemProp : systemProps) {
+      final String keyValue[] = systemProp.split("=");
+      if (keyValue.length != 2) {
+        throwInvalidSystemOption(systemProp, "does not contain a key=value assignment");
       }
-    } catch (Exception e) {
-      logger.warn("Failure while shutting down embedded jetty server.");
+
+      final String optionName = keyValue[0].trim();
+      if (optionName.isEmpty()) {
+        throwInvalidSystemOption(systemProp, "does not contain a key before the assignment");
+      }
+
+      final String optionString = stripQuotes(keyValue[1].trim(), systemProp);
+      if (optionString.isEmpty()) {
+        throwInvalidSystemOption(systemProp, "does not contain a value after the assignment");
+      }
+
+      final OptionValue defaultValue = optionManager.getOption(optionName);
+      if (defaultValue == null) {
+        throwInvalidSystemOption(systemProp, "does not specify a valid option name");
+      }
+      if (defaultValue.type != OptionType.SYSTEM) {
+        throwInvalidSystemOption(systemProp, "does not specify a SYSTEM option ");
+      }
+
+      final OptionValue optionValue = OptionValue.createOption(
+          defaultValue.kind, OptionType.SYSTEM, optionName, optionString);
+      optionManager.setOption(optionValue);
     }
-    Closeables.closeQuietly(engine);
-    try{
-      storeProvider.close();
-    }catch(Exception e){
-      logger.warn("Failure while closing store provider.", e);
-    }
-    Closeables.closeQuietly(coord);
-    Closeables.closeQuietly(manager);
-    Closeables.closeQuietly(context);
-    logger.info("Shutdown completed.");
   }
 
-  private class ShutdownThread extends Thread {
-    ShutdownThread(DrillConfig config) {
-      this.setName("ShutdownHook");
+  /**
+   * Shutdown hook for Drillbit. Closes the drillbit, and reports on errors that
+   * occur during closure, as well as the location the drillbit was started from.
+   */
+  private static class ShutdownThread extends Thread {
+    private final static AtomicInteger idCounter = new AtomicInteger(0);
+    private final Drillbit drillbit;
+    private final StackTrace stackTrace;
+
+    /**
+     * Constructor.
+     *
+     * @param drillbit the drillbit to close down
+     * @param stackTrace the stack trace from where the Drillbit was started;
+     *   use new StackTrace() to generate this
+     */
+    public ShutdownThread(final Drillbit drillbit, final StackTrace stackTrace) {
+      this.drillbit = drillbit;
+      this.stackTrace = stackTrace;
+      /*
+       * TODO should we try to determine a test class name?
+       * See https://blogs.oracle.com/tor/entry/how_to_determine_the_junit
+       */
+
+      setName("Drillbit-ShutdownHook#" + idCounter.getAndIncrement());
     }
 
     @Override
     public void run() {
       logger.info("Received shutdown request.");
-      close();
+      try {
+        /*
+         * We can avoid metrics deregistration concurrency issues by only closing
+         * one drillbit at a time. To enforce that, we synchronize on a convenient
+         * singleton object.
+         */
+        synchronized(idCounter) {
+          drillbit.close();
+        }
+      } catch(final Exception e) {
+        throw new RuntimeException("Caught exception closing Drillbit started from\n" + stackTrace, e);
+      }
     }
-
-  }
-  public ClusterCoordinator getCoordinator() {
-    return coord;
   }
 
   public DrillbitContext getContext() {
-    return this.manager.getContext();
+    return manager.getContext();
+  }
+
+  public static void main(final String[] cli) throws DrillbitStartupException {
+    final StartupOptions options = StartupOptions.parse(cli);
+    start(options);
+  }
+
+  public static Drillbit start(final StartupOptions options) throws DrillbitStartupException {
+    return start(DrillConfig.create(options.getConfigLocation()), null);
+  }
+
+  public static Drillbit start(final DrillConfig config) throws DrillbitStartupException {
+    return start(config, null);
+  }
+
+  public static Drillbit start(final DrillConfig config, final RemoteServiceSet remoteServiceSet)
+      throws DrillbitStartupException {
+    logger.debug("Starting new Drillbit.");
+    // TODO: allow passing as a parameter
+    ScanResult classpathScan = ClassPathScanner.fromPrescan(config);
+    Drillbit bit;
+    try {
+      bit = new Drillbit(config, remoteServiceSet, classpathScan);
+    } catch (final Exception ex) {
+      throw new DrillbitStartupException("Failure while initializing values in Drillbit.", ex);
+    }
+
+    try {
+      bit.run();
+    } catch (final Exception e) {
+      bit.close();
+      throw new DrillbitStartupException("Failure during initial startup of Drillbit.", e);
+    }
+    logger.debug("Started new Drillbit.");
+    return bit;
+  }
+
+  private static void throwInvalidSystemOption(final String systemProp, final String errorMessage) {
+    throw new IllegalStateException("Property \"" + SYSTEM_OPTIONS_NAME + "\" part \"" + systemProp
+        + "\" " + errorMessage + ".");
+  }
+
+  private static String stripQuotes(final String s, final String systemProp) {
+    if (s.isEmpty()) {
+      return s;
+    }
+
+    final char cFirst = s.charAt(0);
+    final char cLast = s.charAt(s.length() - 1);
+    if ((cFirst == '"') || (cFirst == '\'')) {
+      if (cLast != cFirst) {
+        throwInvalidSystemOption(systemProp, "quoted value does not have closing quote");
+      }
+
+      return s.substring(1, s.length() - 2); // strip the quotes
+    }
+
+    if ((cLast == '"') || (cLast == '\'')) {
+      throwInvalidSystemOption(systemProp, "value has unbalanced closing quote");
+    }
+
+    // return as-is
+    return s;
   }
 
 }

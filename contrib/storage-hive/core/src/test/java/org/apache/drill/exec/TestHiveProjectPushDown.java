@@ -18,13 +18,29 @@
 package org.apache.drill.exec;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import org.apache.drill.exec.hive.HiveTestBase;
+import org.apache.drill.exec.planner.physical.PlannerSettings;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 public class TestHiveProjectPushDown extends HiveTestBase {
-  private void testHelper(String query, String expectedColNamesInPlan, int expectedRecordCount)throws Exception {
-    testPhysicalPlan(query, expectedColNamesInPlan);
+
+  // enable decimal data type
+  @BeforeClass
+  public static void enableDecimalDataType() throws Exception {
+    test(String.format("alter session set `%s` = true", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
+  }
+
+  @AfterClass
+  public static void disableDecimalDataType() throws Exception {
+    test(String.format("alter session set `%s` = false", PlannerSettings.ENABLE_DECIMAL_DATA_TYPE_KEY));
+  }
+
+  private void testHelper(String query, int expectedRecordCount, String... expectedSubstrs)throws Exception {
+    testPhysicalPlan(query, expectedSubstrs);
 
     int actualRecordCount = testSql(query);
     assertEquals(String.format("Received unexpected number of rows in output: expected=%d, received=%s",
@@ -36,7 +52,7 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String query = "SELECT `value` as v FROM hive.`default`.kv";
     String expectedColNames = " \"columns\" : [ \"`value`\" ]";
 
-    testHelper(query, expectedColNames, 5);
+    testHelper(query, 5, expectedColNames);
   }
 
   @Test
@@ -44,7 +60,7 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String query = "SELECT boolean_field as b_f, tinyint_field as ti_f FROM hive.`default`.readtest";
     String expectedColNames = " \"columns\" : [ \"`boolean_field`\", \"`tinyint_field`\" ]";
 
-    testHelper(query, expectedColNames, 2);
+    testHelper(query, 2, expectedColNames);
   }
 
   @Test
@@ -52,7 +68,7 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String query = "SELECT double_part as dbl_p FROM hive.`default`.readtest";
     String expectedColNames = " \"columns\" : [ \"`double_part`\" ]";
 
-    testHelper(query, expectedColNames, 2);
+    testHelper(query, 2, expectedColNames);
   }
 
   @Test
@@ -60,7 +76,7 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String query = "SELECT double_part as dbl_p, decimal0_part as dec_p FROM hive.`default`.readtest";
     String expectedColNames = " \"columns\" : [ \"`double_part`\", \"`decimal0_part`\" ]";
 
-    testHelper(query, expectedColNames, 2);
+    testHelper(query, 2, expectedColNames);
   }
 
   @Test
@@ -70,7 +86,7 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String expectedColNames = " \"columns\" : [ \"`boolean_field`\", \"`tinyint_field`\", " +
         "\"`double_part`\", \"`decimal0_part`\" ]";
 
-    testHelper(query, expectedColNames, 2);
+    testHelper(query, 2, expectedColNames);
   }
 
   @Test
@@ -78,6 +94,27 @@ public class TestHiveProjectPushDown extends HiveTestBase {
     String query = "SELECT * FROM hive.`default`.kv";
     String expectedColNames = " \"columns\" : [ \"`key`\", \"`value`\" ]";
 
-    testHelper(query, expectedColNames, 5);
+    testHelper(query, 5, expectedColNames);
+  }
+
+  @Test
+  public void testHiveCountStar() throws Exception {
+    String query = "SELECT count(*) as cnt FROM hive.`default`.kv";
+    String expectedColNames = "\"columns\" : [ ]";
+
+    testHelper(query, 1, expectedColNames);
+  }
+
+  @Test
+  public void projectPushDownOnHiveParquetTable() throws Exception {
+    try {
+      test(String.format("alter session set `%s` = true", ExecConstants.HIVE_OPTIMIZE_SCAN_WITH_NATIVE_READERS));
+      String query = "SELECT boolean_field, boolean_part, int_field, int_part FROM hive.readtest_parquet";
+      String expectedColNames = "\"columns\" : [ \"`boolean_field`\", \"`dir0`\", \"`int_field`\", \"`dir9`\" ]";
+
+      testHelper(query, 2, expectedColNames, "hive-drill-native-parquet-scan");
+    } finally {
+      test(String.format("alter session set `%s` = false", ExecConstants.HIVE_OPTIMIZE_SCAN_WITH_NATIVE_READERS));
+    }
   }
 }

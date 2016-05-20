@@ -20,19 +20,28 @@ package org.apache.drill.exec.planner.sql.parser;
 import java.util.List;
 import java.util.Map;
 
-import org.eigenbase.sql.SqlCall;
-import org.eigenbase.sql.SqlIdentifier;
-import org.eigenbase.sql.SqlJoin;
-import org.eigenbase.sql.SqlNode;
-import org.eigenbase.sql.SqlSelect;
-import org.eigenbase.sql.util.SqlShuttle;
-import org.eigenbase.sql.util.SqlVisitor;
+import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlJoin;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.SqlOrderBy;
+import org.apache.calcite.sql.SqlSelect;
+import org.apache.calcite.sql.SqlSetOption;
+import org.apache.calcite.sql.util.SqlShuttle;
+import org.apache.calcite.sql.util.SqlVisitor;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 
+/**
+ * Implementation of {@link SqlVisitor} that converts bracketed compound {@link SqlIdentifier} to bracket-less compound
+ * {@link SqlIdentifier} (also known as {@link DrillCompoundIdentifier}) to provide ease of use while querying complex
+ * types.
+ * <p/>
+ * For example, this visitor converts {@code a['b'][4]['c']} to {@code a.b[4].c}
+ */
 public class CompoundIdentifierConverter extends SqlShuttle {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(CompoundIdentifierConverter.class);
+//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(CompoundIdentifierConverter.class);
 
   private boolean enableComplex = true;
 
@@ -74,6 +83,7 @@ public class CompoundIdentifierConverter extends SqlShuttle {
       rewriteTypes = REWRITE_RULES.get(call.getClass());
     }
 
+    @Override
     public SqlNode result() {
       if (update) {
         return call.getOperator().createCall(
@@ -85,6 +95,7 @@ public class CompoundIdentifierConverter extends SqlShuttle {
       }
     }
 
+    @Override
     public SqlNode visitChild(
         SqlVisitor<SqlNode> visitor,
         SqlNode expr,
@@ -125,6 +136,18 @@ public class CompoundIdentifierConverter extends SqlShuttle {
     final RewriteType D =RewriteType.DISABLE;
     final RewriteType U =RewriteType.UNCHANGED;
 
+    /*
+    This map stores the rules that instruct each SqlCall class which data field needs
+    to be rewritten if that data field is a CompoundIdentifier
+
+    Key  : Each rule corresponds to a SqlCall class;
+    value: It is an array of RewriteType, each being associated with a data field
+           in that class.
+
+           For example, there are four data fields (query, orderList, offset, fetch)
+           in org.eigenbase.sql.SqlOrderBy. Since only orderList needs to be written,
+           RewriteType[] should be R(D, E, D, D).
+    */
     Map<Class<? extends SqlCall>, RewriteType[]> rules = Maps.newHashMap();
 
   //SqlNodeList keywordList,
@@ -137,8 +160,8 @@ public class CompoundIdentifierConverter extends SqlShuttle {
   //SqlNodeList orderBy,
   //SqlNode offset,
   //SqlNode fetch,
-    rules.put(SqlSelect.class, R(D, E, D, E, E, E, D, E, D, D));
-    rules.put(SqlCreateTable.class, R(D, D, E));
+    rules.put(SqlSelect.class, R(D, E, D, E, E, E, E, E, D, D));
+    rules.put(SqlCreateTable.class, R(D, D, D, E));
     rules.put(SqlCreateView.class, R(D, E, E, D));
     rules.put(SqlDescribeTable.class, R(D, D, E));
     rules.put(SqlDropView.class, R(D));
@@ -146,9 +169,15 @@ public class CompoundIdentifierConverter extends SqlShuttle {
     rules.put(SqlShowSchemas.class, R(D, D));
     rules.put(SqlUseSchema.class, R(D));
     rules.put(SqlJoin.class, R(D, D, D, D, D, E));
+    rules.put(SqlOrderBy.class, R(D, E, D, D));
+    rules.put(SqlDropTable.class, R(D));
+    rules.put(SqlRefreshMetadata.class, R(D));
+    rules.put(SqlSetOption.class, R(D, D, D));
     REWRITE_RULES = ImmutableMap.copyOf(rules);
   }
 
+  // Each type in the input arguments refers to
+  // each data field in the class
   private static RewriteType[] R(RewriteType... types){
     return types;
   }

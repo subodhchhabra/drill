@@ -21,6 +21,7 @@ import io.netty.buffer.DrillBuf;
 
 import java.util.List;
 
+import org.apache.drill.exec.memory.BufferAllocator;
 import org.apache.drill.exec.proto.UserBitShared.RecordBatchDef;
 import org.apache.drill.exec.proto.UserBitShared.SerializedField;
 import org.apache.drill.exec.record.BatchSchema.SelectionVectorMode;
@@ -32,8 +33,8 @@ import com.google.common.collect.Lists;
 /**
  * A specialized version of record batch that can moves out buffers and preps them for writing.
  */
-public class WritableBatch {
-  static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(WritableBatch.class);
+public class WritableBatch implements AutoCloseable {
+  //private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(WritableBatch.class);
 
   private final RecordBatchDef def;
   private final DrillBuf[] buffers;
@@ -50,6 +51,18 @@ public class WritableBatch {
     this.buffers = buffers;
   }
 
+  public WritableBatch transfer(BufferAllocator allocator) {
+    List<DrillBuf> newBuffers = Lists.newArrayList();
+    for (DrillBuf buf : buffers) {
+      int writerIndex = buf.writerIndex();
+      DrillBuf newBuf = buf.transferOwnership(allocator).buffer;
+      newBuf.writerIndex(writerIndex);
+      newBuffers.add(newBuf);
+    }
+    clear();
+    return new WritableBatch(def, newBuffers);
+  }
+
   public RecordBatchDef getDef() {
     return def;
   }
@@ -58,7 +71,7 @@ public class WritableBatch {
     return buffers;
   }
 
-  public void reconstructContainer(VectorContainer container) {
+  public void reconstructContainer(BufferAllocator allocator, VectorContainer container) {
     Preconditions.checkState(!cleared,
         "Attempted to reconstruct a container from a WritableBatch after it had been cleared");
     if (buffers.length > 0) { /* If we have DrillBuf's associated with value vectors */
@@ -67,34 +80,37 @@ public class WritableBatch {
         len += b.capacity();
       }
 
-      DrillBuf newBuf = buffers[0].getAllocator().buffer(len);
+      DrillBuf newBuf = allocator.buffer(len);
+      try {
+        /* Copy data from each buffer into the compound buffer */
+        int offset = 0;
+        for (DrillBuf buf : buffers) {
+          newBuf.setBytes(offset, buf);
+          offset += buf.capacity();
+          buf.release();
+        }
 
-      /* Copy data from each buffer into the compound buffer */
-      int offset = 0;
-      for (DrillBuf buf : buffers) {
-        newBuf.setBytes(offset, buf);
-        offset += buf.capacity();
-        buf.release();
-      }
+        List<SerializedField> fields = def.getFieldList();
 
-      List<SerializedField> fields = def.getFieldList();
+        int bufferOffset = 0;
 
-      int bufferOffset = 0;
+        /*
+         * For each value vector slice up the appropriate size from the compound buffer and load it into the value vector
+         */
+        int vectorIndex = 0;
 
-      /*
-       * For each value vector slice up the appropriate size from the compound buffer and load it into the value vector
-       */
-      int vectorIndex = 0;
-
-      for (VectorWrapper<?> vv : container) {
-        SerializedField fmd = fields.get(vectorIndex);
-        ValueVector v = vv.getValueVector();
-        DrillBuf bb = newBuf.slice(bufferOffset, fmd.getBufferLength());
+        for (VectorWrapper<?> vv : container) {
+          SerializedField fmd = fields.get(vectorIndex);
+          ValueVector v = vv.getValueVector();
+          DrillBuf bb = newBuf.slice(bufferOffset, fmd.getBufferLength());
 //        v.load(fmd, cbb.slice(bufferOffset, fmd.getBufferLength()));
-        v.load(fmd, bb);
-        bb.release();
-        vectorIndex++;
-        bufferOffset += fmd.getBufferLength();
+          v.load(fmd, bb);
+          vectorIndex++;
+          bufferOffset += fmd.getBufferLength();
+        }
+      } finally {
+        // Any vectors that loaded material from newBuf slices above will retain those.
+        newBuf.release(1);
       }
     }
 
@@ -167,15 +183,16 @@ public class WritableBatch {
     return getBatchNoHVWrap(batch.getRecordCount(), batch, sv2);
   }
 
-  public void retainBuffers() {
-    for (DrillBuf buf : buffers) {
-      buf.retain();
+  public void retainBuffers(final int increment) {
+    for (final DrillBuf buf : buffers) {
+      buf.retain(increment);
     }
   }
 
-  public void retainBuffers(int increment) {
-    for (DrillBuf buf : buffers) {
-      buf.retain(increment);
+  @Override
+  public void close() {
+    for(final DrillBuf drillBuf : buffers) {
+      drillBuf.release(1);
     }
   }
 
